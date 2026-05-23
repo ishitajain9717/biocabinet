@@ -1,7 +1,7 @@
 # rnaseq-agent
 
-An agentic RNA-seq analysis pipeline built on [LangGraph](https://github.com/langchain-ai/langgraph).  
-It orchestrates FastQC → trimming → alignment → quantification → normalisation → differential expression → GNN-based PPI enrichment, with an optional RAG layer that grounds LLM summaries in KEGG and Reactome pathway knowledge.
+An agentic transcriptomic analysis pipeline built on [LangGraph](https://github.com/langchain-ai/langgraph).  
+It orchestrates FastQC → trimming → alignment → quantification → normalisation → differential expression → GNN-based PPI enrichment, with an optional RAG layer that grounds LLM summaries in KEGG and Reactome pathway knowledge. It can also deal with spatial transcriptomics and scRNA data. 
 
 ---
 
