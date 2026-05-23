@@ -1,0 +1,34 @@
+# BioCabinet — core Python dependencies
+# Install:  pip install -r requirements.txt
+# With LLM support:  pip install -r requirements.txt -r requirements-llm.txt
+# Editable install (recommended):  pip install -e ".[llm]"
+
+# LangGraph / orchestration
+langgraph>=1.1.9
+langgraph-checkpoint-sqlite>=3.0
+langchain-core>=0.1.0
+
+# Numerics
+numpy>=2.0
+scipy>=1.13
+pandas>=2.0
+
+# Deep learning (enrichment + RAG embeddings)
+torch>=2.0
+torch-geometric>=2.5
+transformers>=4.40
+fair-esm>=2.0.0
+
+# Bulk RNA-seq
+pydeseq2>=0.4
+mygene>=3.2
+
+# scRNA-seq
+scanpy>=1.10
+# Uncomment if Leiden clustering fails at runtime:
+# leidenalg>=0.10
+# python-igraph>=0.11
+
+# Pathway APIs (enrichment build scripts)
+requests>=2.31
+tenacity>=8.2

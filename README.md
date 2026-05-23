@@ -39,10 +39,15 @@ Graph diagrams (Mermaid + PNG) live in `docs/`.
 ## Installation
 
 ```bash
-git clone https://github.com/<your-handle>/rnaseq-agent.git
-cd rnaseq-agent
+git clone https://github.com/ishitajain9717/biocabinet.git
+cd biocabinet
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[llm]"          # core package + OpenAI / Ollama LLM extras
+
+# Option A: editable install (recommended — registers the `rnaseq-agent` CLI)
+pip install -e ".[llm]"
+
+# Option B: plain requirements files
+pip install -r requirements.txt -r requirements-llm.txt
 ```
 
 ### Python dependencies (all modalities)

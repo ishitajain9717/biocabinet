@@ -1,0 +1,5 @@
+# Optional — LLM summaries and RAG prose answers
+# Install:  pip install -r requirements-llm.txt
+
+langchain-openai>=0.1
+langchain-ollama>=0.1

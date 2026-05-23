@@ -1,0 +1,5 @@
+# Optional — development / notebooks
+# Install:  pip install -r requirements-dev.txt
+
+pytest>=8.0
+jupyter>=1.0

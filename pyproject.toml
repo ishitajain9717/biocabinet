@@ -18,6 +18,7 @@ keywords = [
 dependencies = [
     # ── LangGraph / LangChain core ──────────────────────────────────────────
     "langgraph>=1.1.9",
+    "langgraph-checkpoint-sqlite>=3.0",
     "langchain-core>=0.1.0",
 
     # ── Numerics ────────────────────────────────────────────────────────────
