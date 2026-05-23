@@ -1,0 +1,26 @@
+[MAIN]
+# Score was ~8–9/10 mainly due to intentional duplication across pipeline modules
+# (bulk / scrna / enrichment share the same LangGraph + LLM summarise pattern).
+fail-under=8.0
+
+# Lint package code only (not one-off notebooks or scratch scripts).
+ignore-paths=^scripts/enrichment/pathway_data\.ipynb$,
+             ^scripts/enrichment/playfile\.py$
+
+[MESSAGES CONTROL]
+disable=
+    duplicate-code,          # R0801 — expected across graph_nodes / graph.py modules
+    too-few-public-methods,  # dataclasses / TypedDict wrappers
+    too-many-arguments,
+    too-many-locals,
+    too-many-branches,
+    too-many-statements,
+    import-outside-toplevel,   # lazy imports (torch, LLM providers) are intentional
+    broad-exception-caught,  # pipeline nodes catch and return NodeResult, not crash
+    invalid-name,            # bioinformatics IDs (e.g. p2n, g2p) are conventional
+
+[FORMAT]
+max-line-length=100
+
+[DESIGN]
+max-args=10
