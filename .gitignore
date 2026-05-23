@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv*/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# macOS
+.DS_Store
+
+# ── Pipeline runtime outputs ──────────────────────────────────────────────────
+runs/
+pipeline_runs.sqlite
+preprocessing_run.json
+app.log
+*.log
+
+# Intermediate alignment / QC outputs written by the pipeline nodes
+01_qc/
+02_trimmed/
+03_bam/
+04_counts/
+05_normalized/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ── Large model / embedding files ─────────────────────────────────────────────
+# Pre-trained model weights downloaded at runtime
+biobert_v1.1_pubmed_pytorch_model/
+*.ckpt
+
+# ── Data directory ────────────────────────────────────────────────────────────
+# Binary data files (PPI graphs, ESM embeddings, pathway embeddings, RAG index)
+# are too large for git.  See data/README.md for download instructions.
+
+# Exclude everything in data/ except the README
+data/*
+!data/README.md

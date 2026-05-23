@@ -1,0 +1,27 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	ask_data_type(ask_data_type)
+	run_bulk(run_bulk)
+	run_scrna(run_scrna)
+	run_spatial(run_spatial)
+	run_enrichment(run_enrichment)
+	final_report(final_report)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> ask_data_type;
+	ask_data_type -.-> run_bulk;
+	ask_data_type -.-> run_scrna;
+	ask_data_type -.-> run_spatial;
+	run_bulk -.-> final_report;
+	run_bulk -.-> run_enrichment;
+	run_enrichment --> final_report;
+	run_scrna --> final_report;
+	run_spatial --> final_report;
+	final_report --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

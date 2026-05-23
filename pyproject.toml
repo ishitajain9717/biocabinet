@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "biocabinet"
+version = "0.1.0"
+description = "Agentic transcriptomic preprocessing and enrichment pipeline powered by LangGraph"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+keywords = [
+    "rna-seq", "bioinformatics", "langgraph", "gnn", "rag",
+    "differential-expression", "ppi", "pathway-enrichment","scRNA","spatial trancriptomics"
+]
+
+dependencies = [
+    # ── LangGraph / LangChain core ──────────────────────────────────────────
+    "langgraph>=1.1.9",
+    "langchain-core>=0.1.0",
+
+    # ── Numerics ────────────────────────────────────────────────────────────
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "pandas>=2.0",
+
+    # ── Deep learning ───────────────────────────────────────────────────────
+    "torch>=2.0",
+    "torch-geometric>=2.5",
+    "transformers>=4.40",          # BioBERT pathway embeddings
+    "fair-esm>=2.0.0",             # ESM-2 protein sequence embeddings
+
+    # ── Bioinformatics ──────────────────────────────────────────────────────
+    "pydeseq2>=0.4",               # differential expression (DESeq2)
+    "scanpy>=1.10",                # scRNA-seq preprocessing
+    "mygene>=3.2",                 # ENSG → ENSP mapping via mygene.info
+
+    # ── Networking / API ────────────────────────────────────────────────────
+    "requests>=2.31",
+    "tenacity>=8.2",               # retry logic for external API calls
+]
+
+[project.optional-dependencies]
+llm-openai = ["langchain-openai>=0.1"]
+llm-ollama = ["langchain-ollama>=0.1"]
+llm = ["langchain-openai>=0.1", "langchain-ollama>=0.1"]
+
+dev = [
+    "pytest>=8.0",
+    "jupyter>=1.0",
+]
+
+[project.scripts]
+rnaseq-agent = "scripts.orchestrator:run"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scripts*"]
+
+[tool.setuptools.package-data]
+"scripts" = ["py.typed"]

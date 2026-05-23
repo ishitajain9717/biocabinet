@@ -1,0 +1,39 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	collect_config(collect_config)
+	load_data(load_data)
+	qc(qc)
+	filter(filter)
+	normalize(normalize)
+	pca(pca)
+	cluster(cluster)
+	markers(markers)
+	summarize(summarize)
+	error_node(error_node)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> collect_config;
+	cluster -.-> error_node;
+	cluster -.-> markers;
+	collect_config --> load_data;
+	filter -.-> error_node;
+	filter -.-> normalize;
+	load_data -.-> error_node;
+	load_data -.-> qc;
+	markers -.-> error_node;
+	markers -.-> summarize;
+	normalize -.-> error_node;
+	normalize -.-> pca;
+	pca -.-> cluster;
+	pca -.-> error_node;
+	qc -.-> error_node;
+	qc -.-> filter;
+	error_node --> __end__;
+	summarize --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
