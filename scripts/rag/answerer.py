@@ -36,6 +36,7 @@ Environment variables for LLM selection (same as bulk pipeline):
     OPENAI_API_KEY    if set, use ChatOpenAI
     (Ollama takes priority over OpenAI)
 """
+
 from __future__ import annotations
 
 import re
@@ -43,21 +44,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from scripts.rag.retriever import Retriever, get_retriever, DEFAULT_INDEX_DIR
-
+from scripts.rag.retriever import DEFAULT_INDEX_DIR, Retriever, get_retriever
 
 # ---------------------------------------------------------------------------
 # result dataclass
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class AnswerResult:
-    question:  str
-    answer:    str
-    citations: list[dict]         = field(default_factory=list)
-    docs:      list[dict]         = field(default_factory=list)
-    ok:        bool               = True
-    error:     Optional[str]      = None
+    question: str
+    answer: str
+    citations: list[dict] = field(default_factory=list)
+    docs: list[dict] = field(default_factory=list)
+    ok: bool = True
+    error: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -65,11 +66,18 @@ class AnswerResult:
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = (
-    "You are a bioinformatics research assistant. "
-    "Answer the question below using ONLY the provided pathway documents as evidence. "
-    "Cite sources using [N] markers that correspond to the numbered documents. "
-    "If the documents do not contain sufficient information, say so honestly. "
-    "Be concise: 3–6 sentences maximum."
+    "You are a bioinformatics research assistant helping interpret an"
+    " RNA-seq experiment. You have two sources of information:\n"
+    "  1. A 'Pipeline run summary' with facts about the specific experiment"
+    " (samples, DEG counts, conditions, predicted interactions).\n"
+    "  2. Numbered pathway documents from Reactome/KEGG.\n\n"
+    "Rules:\n"
+    "- For questions about the experiment itself (conditions, sample counts,"
+    " DEG numbers, tools used), answer from the Pipeline run summary.\n"
+    "- For biology questions about mechanisms, pathways, or gene functions,"
+    " cite the pathway documents using [N] markers.\n"
+    "- If neither source has sufficient information, say so honestly.\n"
+    "- Be concise: 3-6 sentences maximum."
 )
 
 _DOC_TEMPLATE = "[{rank}] {source} — {pathway_name}\n{text_excerpt}"
@@ -87,19 +95,25 @@ Answer with inline citations [N]:"""
 
 
 def _build_user_prompt(
-    question:   str,
-    docs:       list[dict],
-    n_deg:      int | None,
+    question: str,
+    docs: list[dict],
+    n_deg: int | None,
     llm_summary: str | None,
+    pipeline_results: dict | None = None,
     max_chars_per_doc: int = 300,
 ) -> str:
-    # experiment context block
-    ctx_parts: list[str] = []
-    if n_deg is not None:
-        ctx_parts.append(f"- Number of differentially expressed genes: {n_deg}")
-    if llm_summary:
-        ctx_parts.append(f"- Pipeline summary: {llm_summary[:400]}")
-    experiment_context = "\n".join(ctx_parts) if ctx_parts else "(none provided)"
+    # experiment context block — prefer rich pipeline_results over plain counts
+    if pipeline_results:
+        from scripts.rag.pipeline_context import format_pipeline_results_for_prompt
+
+        experiment_context = format_pipeline_results_for_prompt(pipeline_results)
+    else:
+        ctx_parts: list[str] = []
+        if n_deg is not None:
+            ctx_parts.append(f"- Number of differentially expressed genes: {n_deg}")
+        if llm_summary:
+            ctx_parts.append(f"- Pipeline summary: {llm_summary[:400]}")
+        experiment_context = "\n".join(ctx_parts) if ctx_parts else "(none provided)"
 
     # numbered doc block
     doc_lines = []
@@ -126,6 +140,7 @@ def _build_user_prompt(
 # deterministic fallback (no LLM)
 # ---------------------------------------------------------------------------
 
+
 def _fallback_answer(question: str, docs: list[dict]) -> str:
     """Build a structured answer from doc titles alone — no LLM needed."""
     lines = [
@@ -147,22 +162,57 @@ def _fallback_answer(question: str, docs: list[dict]) -> str:
 # LLM helper (reuses the pattern from bulk pipeline graph_nodes.py)
 # ---------------------------------------------------------------------------
 
+_OLLAMA_BASE_URL = "http://localhost:11434"
+
+
+def _ollama_is_reachable(timeout: float = 3.0) -> bool:
+    """Return True only if the Ollama HTTP server responds within `timeout` s."""
+    try:
+        import urllib.request
+
+        req = urllib.request.urlopen(f"{_OLLAMA_BASE_URL}/api/tags", timeout=timeout)
+        return req.status == 200
+    except Exception:
+        return False
+
+
 def _make_llm(temperature: float = 0.1):
     import os
+
     ollama_model = os.environ.get("OLLAMA_MODEL")
-    openai_key   = os.environ.get("OPENAI_API_KEY")
+    openai_key = os.environ.get("OPENAI_API_KEY")
 
     if ollama_model:
-        try:
-            from langchain_ollama import ChatOllama
-            return ChatOllama(model=ollama_model, temperature=temperature)
-        except Exception:
-            pass
+        if not _ollama_is_reachable():
+            print(
+                f"[RAG] OLLAMA_MODEL={ollama_model!r} is set but Ollama server is not "
+                "reachable at localhost:11434 — falling back to no-LLM mode.\n"
+                "      Start Ollama with:  ollama serve",
+                flush=True,
+            )
+        else:
+            try:
+                from langchain_ollama import ChatOllama
+
+                return ChatOllama(
+                    model=ollama_model,
+                    temperature=temperature,
+                    keep_alive=-1,  # keep model loaded between calls
+                    client_kwargs={"timeout": 60},
+                )
+            except Exception:
+                pass
 
     if openai_key:
         try:
             from langchain_openai import ChatOpenAI
-            return ChatOpenAI(model="gpt-4o-mini", temperature=temperature, api_key=openai_key)
+
+            return ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=temperature,
+                api_key=openai_key,
+                timeout=60,
+            )
         except Exception:
             pass
 
@@ -173,6 +223,7 @@ def _make_llm(temperature: float = 0.1):
 # citation parser
 # ---------------------------------------------------------------------------
 
+
 def _parse_citations(answer_text: str, docs: list[dict]) -> list[dict]:
     """Extract [N] references from the answer and match them to docs."""
     mentioned_ranks = set(int(m) for m in re.findall(r"\[(\d+)\]", answer_text))
@@ -181,13 +232,15 @@ def _parse_citations(answer_text: str, docs: list[dict]) -> list[dict]:
     for rank in sorted(mentioned_ranks):
         if rank in doc_by_rank:
             d = doc_by_rank[rank]
-            citations.append({
-                "rank":         rank,
-                "id":           d.get("id"),
-                "pathway_name": d.get("pathway_name"),
-                "source":       d.get("source"),
-                "score":        d.get("score"),
-            })
+            citations.append(
+                {
+                    "rank": rank,
+                    "id": d.get("id"),
+                    "pathway_name": d.get("pathway_name"),
+                    "source": d.get("source"),
+                    "score": d.get("score"),
+                }
+            )
     return citations
 
 
@@ -195,14 +248,16 @@ def _parse_citations(answer_text: str, docs: list[dict]) -> list[dict]:
 # public entry point
 # ---------------------------------------------------------------------------
 
+
 def answer(
-    question:    str,
+    question: str,
     gene_filter: Optional[list[str] | set[str]] = None,
-    k:           int  = 8,
-    n_deg:       Optional[int] = None,
+    k: int = 8,
+    n_deg: Optional[int] = None,
     llm_summary: Optional[str] = None,
-    index_dir:   Path = DEFAULT_INDEX_DIR,
-    retriever:   Optional[Retriever] = None,
+    pipeline_results: Optional[dict] = None,
+    index_dir: Path = DEFAULT_INDEX_DIR,
+    retriever: Optional[Retriever] = None,
 ) -> AnswerResult:
     """Retrieve + synthesise an answer to `question`.
 
@@ -236,25 +291,50 @@ def answer(
             ok=True,
         )
 
+    # Warn when all retrieved docs have low similarity — the question likely
+    # does not match any pathway and the answer will be unreliable.
+    top_score = docs[0].get("score", 1.0) if docs else 1.0
+    low_relevance = top_score < 0.60
+
     # 2. Build prompt
     user_prompt = _build_user_prompt(
         question=question,
         docs=docs,
         n_deg=n_deg,
         llm_summary=llm_summary,
+        pipeline_results=pipeline_results,
     )
 
     # 3. LLM call (with fallback)
+    if low_relevance:
+        print(
+            f"  [RAG] Note: top pathway similarity={top_score:.2f} — "
+            "this question may not be about biological pathways.",
+            flush=True,
+        )
+
     llm = _make_llm()
     if llm is None:
         answer_text = _fallback_answer(question, docs)
     else:
+        import os
+
+        model_name = os.environ.get("OLLAMA_MODEL") or os.environ.get(
+            "OPENAI_MODEL", "LLM"
+        )
+        print(
+            f"Thinking with {model_name} (may take up to 30 s on first call)...",
+            flush=True,
+        )
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
-            resp = llm.invoke([
-                SystemMessage(content=_SYSTEM_PROMPT),
-                HumanMessage(content=user_prompt),
-            ])
+
+            resp = llm.invoke(
+                [
+                    SystemMessage(content=_SYSTEM_PROMPT),
+                    HumanMessage(content=user_prompt),
+                ]
+            )
             answer_text = resp.content
         except Exception as exc:
             # LLM failed — degrade gracefully
@@ -293,4 +373,7 @@ if __name__ == "__main__":
     if result.citations:
         print("=== CITATIONS ===")
         for c in result.citations:
-            print(f"  [{c['rank']}] {c['pathway_name']}  ({c['source']}, score={c['score']})")
+            print(
+                f"  [{c['rank']}] {c['pathway_name']}"
+                f"  ({c['source']}, score={c['score']})"
+            )

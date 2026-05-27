@@ -24,18 +24,208 @@ Router
 _route_after_query(state) → "rag_answer" | END
     Read state["should_quit"] and decide whether to continue or stop.
 """
+
 from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage
 
 from scripts.rag.graph_state import RagChatState
 
-
 # ---------------------------------------------------------------------------
 # node 1 — collect the user's question
 # ---------------------------------------------------------------------------
 
 _QUIT_SIGNALS = {"", "quit", "exit", "q", "done", "bye"}
+
+# ---------------------------------------------------------------------------
+# metadata question routing
+# ---------------------------------------------------------------------------
+
+# Questions about the pipeline run itself — answer from pipeline_results/context.
+_DEG_KEYWORDS = (
+    "how many",
+    "how much",
+    "number of",
+    "count",
+    "total",
+    "differentially expressed",
+    "differentially regulated",
+    "significant genes",
+    "sig genes",
+    "deg count",
+    "n deg",
+    "how many genes",
+    "upregulated",
+    "downregulated",
+    "how many samples",
+    "samples completed",
+    "sample count",
+)
+
+_PIPELINE_KEYWORDS = (
+    "what pipeline",
+    "which pipeline",
+    "pipeline used",
+    "pipeline was",
+    "what tool",
+    "which tool",
+    "what software",
+    "which software",
+    "what workflow",
+    "which workflow",
+    "what steps",
+    "which steps",
+    "how was this",
+    "how were the",
+    "how did you",
+    "what was run",
+    "which was run",
+    "what aligner",
+    "which aligner",
+    "how aligned",
+    "what normali",
+    "which normali",
+)
+
+_CONDITIONS_KEYWORDS = (
+    "what conditions",
+    "which conditions",
+    "experimental design",
+    "what comparison",
+    "which comparison",
+    "treated vs",
+    "control vs",
+    "what groups",
+    "which groups",
+    "experimental groups",
+)
+
+_DATABASE_KEYWORDS = (
+    "which database",
+    "what database",
+    "pathway database",
+    "which source",
+    "what source",
+    "kegg",
+    "reactome",
+    "where do the pathways",
+    "pathway source",
+    "pathway library",
+    "index built",
+    "how many pathways",
+    "number of pathways",
+)
+
+
+def _answer_from_metadata(question: str, ctx: dict, pr: dict | None) -> str | None:
+    """Answer run-level questions (DEG counts, pipeline steps, databases) from context.
+
+    Returns a plain-text answer, or None to fall through to pathway RAG.
+    """
+    q = question.lower()
+    pr = pr or {}
+
+    # --- experimental conditions questions ---
+    if any(kw in q for kw in _CONDITIONS_KEYWORDS):
+        conds = pr.get("conditions") or {}
+        if conds:
+            all_conds = conds.get("all") or {}
+            if all_conds:
+                groups: dict[str, list] = {}
+                for sample, group in all_conds.items():
+                    groups.setdefault(group, []).append(sample)
+                lines = ["Experimental design:"]
+                for group, samples in groups.items():
+                    lines.append(f"  {group}: {', '.join(samples)}")
+                return "\n".join(lines)
+            return (
+                f"Comparison: {conds.get('treated','treated')} vs "
+                f"{conds.get('reference','control')}"
+            )
+        return "Experimental conditions were not recorded in the current context."
+
+    # --- pipeline methodology questions ---
+    if any(kw in q for kw in _PIPELINE_KEYWORDS):
+        lines = [
+            "This RNA-seq pipeline ran the following steps:",
+            "  1. FastQC — read quality control",
+            "  2. Trim Galore — adapter trimming (optional)",
+            "  3. STAR — spliced alignment to the reference genome",
+            "  4. featureCounts — gene-level read quantification",
+            "  5. DESeq2 (via PyDESeq2) — differential expression analysis",
+            "  6. GIN-PPI GNN — protein–protein interaction inference on DEG pairs",
+            "  7. RAG (BioBERT + Reactome/KEGG) — pathway-grounded Q&A",
+        ]
+        conds = pr.get("conditions") or {}
+        if conds:
+            lines.append(
+                f"\nComparison: {conds.get('treated','treated')} vs "
+                f"{conds.get('reference','control')}"
+            )
+        if pr.get("n_samples_ok") is not None:
+            lines.append(f"Samples that completed successfully: {pr['n_samples_ok']}")
+        return "\n".join(lines)
+
+    # --- pathway database questions ---
+    if any(kw in q for kw in _DATABASE_KEYWORDS):
+        return (
+            "The RAG index was built from two pathway databases:\n"
+            "  • Reactome — curated human reaction and pathway data\n"
+            "  • KEGG — Kyoto Encyclopedia of Genes and Genomes pathways\n\n"
+            "Documents were embedded with BioBERT (dmis-lab/biobert-base-cased-v1.2) "
+            "and stored as a NumPy vector index for cosine-similarity retrieval."
+        )
+
+    # --- DEG / sample count questions ---
+    if not any(kw in q for kw in _DEG_KEYWORDS):
+        return None
+
+    n_deg = pr.get("n_deg_significant") or ctx.get("n_deg_significant")
+    deg_top = pr.get("deg_top") or []
+    summary = ctx.get("child_summary") or ""
+
+    if "sample" in q:
+        n_ok = pr.get("n_samples_ok")
+        if n_ok is not None:
+            return (
+                f"This run had {n_ok} sample(s)"
+                " complete the full preprocessing pipeline."
+            )
+
+    if n_deg is not None:
+        lines = [
+            f"This run found {n_deg} statistically significant differentially "
+            f"expressed gene(s) (padj < threshold, |log2FC| > threshold)."
+        ]
+        if deg_top:
+            lines.append("\nTop differentially expressed genes:")
+            for g in deg_top[:5]:
+                arrow = "▲" if g["direction"] == "up" else "▼"
+                lines.append(
+                    f"  {arrow} {g['gene_id']}"
+                    f"  log2FC={g['log2fc']:+.2f}  padj={g['padj']:.2e}"
+                )
+        return "\n".join(lines)
+
+    import re
+
+    m = re.search(r"(\d+)\s+sig(?:nificant)?\s+DEG", summary, re.IGNORECASE)
+    if m:
+        return (
+            f"Based on the pipeline summary, there were {m.group(1)} significant "
+            "differentially expressed genes in this run."
+        )
+
+    if summary:
+        return (
+            "The exact DEG count was not recorded in the chat context for this run. "
+            f"Here is the pipeline summary:\n\n{summary}"
+        )
+
+    return (
+        "The DEG count is not available in the current chat context. "
+        "It is recorded in deseq2_significant.tsv under your run output directory."
+    )
 
 
 def graph_node_collect_query(state: RagChatState) -> dict:
@@ -50,13 +240,14 @@ def graph_node_collect_query(state: RagChatState) -> dict:
 
     return {
         "should_quit": False,
-        "messages":    [HumanMessage(content=raw)],
+        "messages": [HumanMessage(content=raw)],
     }
 
 
 # ---------------------------------------------------------------------------
 # node 2 — retrieve + answer
 # ---------------------------------------------------------------------------
+
 
 def graph_node_rag_answer(state: RagChatState) -> dict:
     """Retrieve relevant pathway docs and answer the latest question."""
@@ -71,27 +262,43 @@ def graph_node_rag_answer(state: RagChatState) -> dict:
 
     # Build gene_filter from pipeline context if available
     ctx = state.get("pipeline_context") or {}
+    pr = state.get("pipeline_results") or {}
     gene_filter: list[str] = []
 
-    # Try to read DEG gene IDs from the significant gene TSV path
-    deg_sig = ctx.get("deg_sig_path")
-    if deg_sig:
-        try:
-            from scripts.rag.augment import _read_all_deg_ids_sorted, _select_genes
-            all_genes = _read_all_deg_ids_sorted(deg_sig)
-            gene_filter = _select_genes(all_genes, pinned=set())
-        except Exception:
-            pass
+    # Short-circuit: if this is a run-metadata question (DEG count etc.),
+    # answer directly from context without hitting pathway retrieval at all.
+    meta_answer = _answer_from_metadata(question, ctx, pr)
+    if meta_answer is not None:
+        print(f"\nAnswer:\n{meta_answer}\n")
+        return {"messages": [AIMessage(content=meta_answer)]}
+
+    # Build gene filter — prefer structured pipeline_results DEG list; fall
+    # back to reading the sig TSV path.
+    deg_top = pr.get("deg_top") or []
+    if deg_top:
+        gene_filter = [g["gene_id"] for g in deg_top]
+    else:
+        deg_sig = ctx.get("deg_sig_path")
+        if deg_sig:
+            try:
+                from scripts.rag.augment import _read_all_deg_ids_sorted, _select_genes
+
+                all_genes = _read_all_deg_ids_sorted(deg_sig)
+                gene_filter = _select_genes(all_genes, pinned=set())
+            except Exception:
+                pass
 
     # Call the RAG answerer
     try:
         from scripts.rag.answerer import answer
+
         result = answer(
             question=question,
             gene_filter=gene_filter or None,
             k=8,
-            n_deg=ctx.get("n_deg_significant"),
+            n_deg=pr.get("n_deg_significant") or ctx.get("n_deg_significant"),
             llm_summary=ctx.get("child_summary"),
+            pipeline_results=pr or None,
         )
 
         if result.ok and result.answer:
@@ -116,6 +323,7 @@ def graph_node_rag_answer(state: RagChatState) -> dict:
 # ---------------------------------------------------------------------------
 # conditional router
 # ---------------------------------------------------------------------------
+
 
 def _route_after_query(state: RagChatState) -> str:
     """If should_quit is True, go to END; otherwise ask + answer."""

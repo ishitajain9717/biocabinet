@@ -7,6 +7,7 @@ Exports:
     get_dfs_sub_graph   — same, DFS variant
     print_file          — print to stdout AND optionally append to a log file
 """
+
 from __future__ import annotations
 
 from collections import deque
@@ -15,18 +16,19 @@ from typing import Sequence
 import numpy as np
 import torch
 
-
 # ---------- logging helper ----------
+
 
 def print_file(msg: str, save_file_path: str | None = None) -> None:
     """Print to stdout and optionally append the same message to a log file."""
-    print(msg)
+    print(msg, flush=True)
     if save_file_path:
         with open(save_file_path, "a") as f:
             f.write(msg + "\n")
 
 
 # ---------- metrics ----------
+
 
 class Metrictor_PPI:
     """Multi-label classification metrics for the 7-class PPI task.
@@ -35,18 +37,22 @@ class Metrictor_PPI:
     Vectorized over PyTorch tensors — no Python loops.
     """
 
-    def __init__(self, pred_y: torch.Tensor, true_y: torch.Tensor, is_binary: bool = False):
+    def __init__(
+        self, pred_y: torch.Tensor, true_y: torch.Tensor, is_binary: bool = False
+    ):
         pred = pred_y.detach().cpu().to(torch.bool)
         true = true_y.detach().cpu().to(torch.bool)
 
         if is_binary:
             assert pred.ndim == 1 and true.ndim == 1, "binary: expect 1-D tensors"
         else:
-            assert pred.shape == true.shape, f"shape mismatch: {pred.shape} vs {true.shape}"
+            assert (
+                pred.shape == true.shape
+            ), f"shape mismatch: {pred.shape} vs {true.shape}"
 
-        self.TP = int(( pred &  true).sum().item())
-        self.FP = int(( pred & ~true).sum().item())
-        self.FN = int((~pred &  true).sum().item())
+        self.TP = int((pred & true).sum().item())
+        self.FP = int((pred & ~true).sum().item())
+        self.FN = int((~pred & true).sum().item())
         self.TN = int((~pred & ~true).sum().item())
         self.num = pred.numel()
 
@@ -67,10 +73,15 @@ class Metrictor_PPI:
 
     def show_result(self) -> None:
         print(f"  TP={self.TP}  FP={self.FP}  TN={self.TN}  FN={self.FN}")
-        print(f"  Precision={self.Precision:.4f}  Recall={self.Recall:.4f}  F1={self.F1:.4f}")
+        print(
+            f"  Precision={self.Precision:.4f}"
+            f"  Recall={self.Recall:.4f}"
+            f"  F1={self.F1:.4f}"
+        )
 
 
 # ---------- union-find ----------
+
 
 class UnionSet:
     """Union-find with path compression and union-by-rank.
@@ -110,6 +121,7 @@ class UnionSet:
 # ---------- BFS / DFS subgraph splitters ----------
 # Module-level (despite where the originals lived) — gnn_data.py calls them as such.
 
+
 def get_bfs_sub_graph(
     ppi_list: Sequence[Sequence[int]],
     node_num: int,
@@ -134,7 +146,9 @@ def get_bfs_sub_graph(
                 selected_edges.append(eidx)
                 if len(selected_edges) >= sub_graph_size:
                     break
-            other = ppi_list[eidx][1] if ppi_list[eidx][0] == curr else ppi_list[eidx][0]
+            other = (
+                ppi_list[eidx][1] if ppi_list[eidx][0] == curr else ppi_list[eidx][0]
+            )
             if other not in selected_nodes:
                 queue.append(other)
     return selected_edges
@@ -164,7 +178,9 @@ def get_dfs_sub_graph(
                 selected_edges.append(eidx)
                 if len(selected_edges) >= sub_graph_size:
                     break
-            other = ppi_list[eidx][1] if ppi_list[eidx][0] == curr else ppi_list[eidx][0]
+            other = (
+                ppi_list[eidx][1] if ppi_list[eidx][0] == curr else ppi_list[eidx][0]
+            )
             if other not in selected_nodes:
                 stack.append(other)
     return selected_edges

@@ -22,6 +22,7 @@ should_quit : bool
     types "quit" / "exit" / "q").  The conditional router reads this
     to decide whether to loop back or go to END.
 """
+
 from __future__ import annotations
 
 from typing import Annotated, TypedDict
@@ -30,6 +31,7 @@ from langgraph.graph.message import add_messages
 
 
 class RagChatState(TypedDict):
-    pipeline_context: dict
-    messages:         Annotated[list, add_messages]
-    should_quit:      bool
+    pipeline_context: dict  # lightweight context (paths, counts, summary text)
+    pipeline_results: dict  # rich structured pipeline output for the LLM prompt
+    messages: Annotated[list, add_messages]
+    should_quit: bool

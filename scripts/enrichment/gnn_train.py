@@ -21,6 +21,7 @@ Saves under out_dir:
     training_history.json       per-epoch metric dicts
     tensorboard/                optional TB logs (if tensorboard installed)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -40,10 +41,10 @@ from scripts.enrichment.gnn_data import GNNDataset
 from scripts.enrichment.gnn_model import GIN_PPI, count_parameters
 from scripts.enrichment.utils import Metrictor_PPI, print_file
 
-
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
 
 def _resolve_device(spec: str) -> torch.device:
     """Pick a torch.device.
@@ -72,7 +73,9 @@ def _set_seeds(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _iter_batches(ids: list[int], batch_size: int, shuffle: bool = True) -> Iterable[torch.Tensor]:
+def _iter_batches(
+    ids: list[int], batch_size: int, shuffle: bool = True
+) -> Iterable[torch.Tensor]:
     """Yield 1-D LongTensors of edge ids, batch_size at a time."""
     ids = list(ids)
     if shuffle:
@@ -88,6 +91,7 @@ def _iter_batches(ids: list[int], batch_size: int, shuffle: bool = True) -> Iter
 # core epoch logic
 # ---------------------------------------------------------------------------
 
+
 def train_one_epoch(
     model: GIN_PPI,
     data,
@@ -97,17 +101,20 @@ def train_one_epoch(
     loss_fn: nn.Module,
     device: torch.device,
 ) -> dict:
-    """Run one training epoch. Returns dict with avg loss + F1/Precision/Recall on the full epoch."""
+    """Run one training epoch.
+
+    Returns dict with avg loss + F1/Precision/Recall on the full epoch.
+    """
     model.train()
-    epoch_preds:  list[torch.Tensor] = []
+    epoch_preds: list[torch.Tensor] = []
     epoch_labels: list[torch.Tensor] = []
     loss_sum = 0.0
     n_batches = 0
 
     for batch_ids in _iter_batches(train_ids, batch_size, shuffle=True):
         batch_ids = batch_ids.to(device)
-        logits = model(data.x, data.pathway_x, data.edge_index, batch_ids)   # (B, C)
-        labels = data.edge_attr[batch_ids].float()                             # (B, C)
+        logits = model(data.x, data.pathway_x, data.edge_index, batch_ids)  # (B, C)
+        labels = data.edge_attr[batch_ids].float()  # (B, C)
 
         loss = loss_fn(logits, labels)
 
@@ -123,14 +130,14 @@ def train_one_epoch(
         loss_sum += loss.item()
         n_batches += 1
 
-    all_preds  = torch.cat(epoch_preds,  dim=0)
+    all_preds = torch.cat(epoch_preds, dim=0)
     all_labels = torch.cat(epoch_labels, dim=0)
     metrics = Metrictor_PPI(all_preds, all_labels)
     return {
-        "loss":      loss_sum / max(n_batches, 1),
+        "loss": loss_sum / max(n_batches, 1),
         "precision": metrics.Precision,
-        "recall":    metrics.Recall,
-        "f1":        metrics.F1,
+        "recall": metrics.Recall,
+        "f1": metrics.F1,
         "n_batches": n_batches,
         "n_samples": int(all_labels.shape[0]),
     }
@@ -147,7 +154,7 @@ def validate(
 ) -> dict:
     """Validation pass. Concats all batches before computing metrics (correct way)."""
     model.eval()
-    val_preds:  list[torch.Tensor] = []
+    val_preds: list[torch.Tensor] = []
     val_labels: list[torch.Tensor] = []
     loss_sum = 0.0
     n_batches = 0
@@ -165,14 +172,14 @@ def validate(
         loss_sum += loss.item()
         n_batches += 1
 
-    all_preds  = torch.cat(val_preds,  dim=0)
+    all_preds = torch.cat(val_preds, dim=0)
     all_labels = torch.cat(val_labels, dim=0)
     metrics = Metrictor_PPI(all_preds, all_labels)
     return {
-        "loss":      loss_sum / max(n_batches, 1),
+        "loss": loss_sum / max(n_batches, 1),
         "precision": metrics.Precision,
-        "recall":    metrics.Recall,
-        "f1":        metrics.F1,
+        "recall": metrics.Recall,
+        "f1": metrics.F1,
         "n_batches": n_batches,
         "n_samples": int(all_labels.shape[0]),
     }
@@ -182,35 +189,36 @@ def validate(
 # top-level training entrypoint
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class TrainResult:
-    best_f1:        float
-    best_epoch:     int
+    best_f1: float
+    best_epoch: int
     best_ckpt_path: Path
     last_ckpt_path: Path
-    history_path:   Path
-    history:        list[dict] = field(default_factory=list)
-    n_train:        int = 0
-    n_val:          int = 0
-    n_params:       int = 0
-    device:         str = "cpu"
+    history_path: Path
+    history: list[dict] = field(default_factory=list)
+    n_train: int = 0
+    n_val: int = 0
+    n_params: int = 0
+    device: str = "cpu"
 
 
 def train(
     dataset: GNNDataset,
     out_dir: Path,
-    epochs:        int   = 100,
-    batch_size:    int   = 512,
-    lr:            float = 1e-3,
-    weight_decay:  float = 1e-4,
-    device:        str   = "auto",
-    split_method:  str   = "random",   # "random" | "bfs" | "dfs"
-    test_size:     float = 0.2,
-    seed:          int   = 1,
+    epochs: int = 100,
+    batch_size: int = 512,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-4,
+    device: str = "auto",
+    split_method: str = "random",  # "random" | "bfs" | "dfs"
+    test_size: float = 0.2,
+    seed: int = 1,
     use_tensorboard: bool = True,
     early_stop_patience: Optional[int] = 20,
-    scheduler_patience:  int = 5,
-    model_kwargs:  Optional[dict] = None,
+    scheduler_patience: int = 5,
+    model_kwargs: Optional[dict] = None,
 ) -> TrainResult:
     """Full training loop.
 
@@ -223,7 +231,8 @@ def train(
         test_size: validation fraction (0..1)
         seed: reproducibility
         use_tensorboard: log to out_dir/tensorboard (silently skipped if TB missing)
-        early_stop_patience: stop after N epochs of no val_f1 improvement (None = disabled)
+        early_stop_patience: stop after N epochs of no val_f1 improvement
+            (None = disabled)
         scheduler_patience: ReduceLROnPlateau patience
         model_kwargs: passed straight to GIN_PPI(...)
     """
@@ -232,28 +241,37 @@ def train(
     _set_seeds(seed)
 
     dev = _resolve_device(device)
-    print(f"[train] device: {dev}")
+    print(f"[train] device: {dev}", flush=True)
 
     # ---- split + tensors ----
     splits = dataset.split(method=split_method, test_size=test_size, seed=seed)
     train_ids = splits["train_index"]
-    val_ids   = splits["valid_index"]
-    print(f"[train] split={split_method}  n_train={len(train_ids)}  n_val={len(val_ids)}")
+    val_ids = splits["valid_index"]
+    print(
+        f"[train] split={split_method}  n_train={len(train_ids)}  n_val={len(val_ids)}",
+        flush=True,
+    )
 
     data = dataset.to_pyg_data().to(dev)
-    print(f"[train] data on device: x={tuple(data.x.shape)}  "
-          f"pathway_x={tuple(data.pathway_x.shape)}  "
-          f"edge_index={tuple(data.edge_index.shape)}")
+    print(
+        f"[train] data on device: x={tuple(data.x.shape)}  "
+        f"pathway_x={tuple(data.pathway_x.shape)}  "
+        f"edge_index={tuple(data.edge_index.shape)}",
+        flush=True,
+    )
 
     # ---- model + optim + loss ----
     model_kwargs = model_kwargs or {}
     model = GIN_PPI(**model_kwargs).to(dev)
     n_params = count_parameters(model)
-    print(f"[train] model params: {n_params:,}")
+    print(f"[train] model params: {n_params:,}", flush=True)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=scheduler_patience,
+        optimizer,
+        mode="max",
+        factor=0.5,
+        patience=scheduler_patience,
     )
     loss_fn = nn.BCEWithLogitsLoss()
 
@@ -262,39 +280,42 @@ def train(
     if use_tensorboard:
         try:
             from torch.utils.tensorboard import SummaryWriter
+
             writer = SummaryWriter(log_dir=str(out_dir / "tensorboard"))
         except ImportError:
             print("[train] tensorboard not installed, skipping TB logs")
 
     best_ckpt_path = out_dir / "gnn_model_valid_best.ckpt"
     last_ckpt_path = out_dir / "gnn_model_train_last.ckpt"
-    history_path   = out_dir / "training_history.json"
+    history_path = out_dir / "training_history.json"
 
-    best_f1     = -1.0
-    best_epoch  = -1
-    no_improve  = 0
+    best_f1 = -1.0
+    best_epoch = -1
+    no_improve = 0
     history: list[dict] = []
 
     for epoch in range(1, epochs + 1):
-        train_metrics = train_one_epoch(model, data, train_ids, batch_size, optimizer, loss_fn, dev)
-        val_metrics   = validate(model, data, val_ids, batch_size, loss_fn, dev)
+        train_metrics = train_one_epoch(
+            model, data, train_ids, batch_size, optimizer, loss_fn, dev
+        )
+        val_metrics = validate(model, data, val_ids, batch_size, loss_fn, dev)
         scheduler.step(val_metrics["f1"])
         cur_lr = optimizer.param_groups[0]["lr"]
 
         record = {
             "epoch": epoch,
-            "lr":    cur_lr,
+            "lr": cur_lr,
             "train": train_metrics,
-            "val":   val_metrics,
+            "val": val_metrics,
         }
         history.append(record)
 
         if writer is not None:
             for split, m in [("train", train_metrics), ("val", val_metrics)]:
-                writer.add_scalar(f"{split}/loss",      m["loss"],      epoch)
+                writer.add_scalar(f"{split}/loss", m["loss"], epoch)
                 writer.add_scalar(f"{split}/precision", m["precision"], epoch)
-                writer.add_scalar(f"{split}/recall",    m["recall"],    epoch)
-                writer.add_scalar(f"{split}/f1",        m["f1"],        epoch)
+                writer.add_scalar(f"{split}/recall", m["recall"], epoch)
+                writer.add_scalar(f"{split}/f1", m["f1"], epoch)
             writer.add_scalar("lr", cur_lr, epoch)
 
         print_file(
@@ -307,15 +328,24 @@ def train(
         torch.save({"epoch": epoch, "state_dict": model.state_dict()}, last_ckpt_path)
 
         if val_metrics["f1"] > best_f1:
-            best_f1    = val_metrics["f1"]
+            best_f1 = val_metrics["f1"]
             best_epoch = epoch
             no_improve = 0
-            torch.save({"epoch": epoch, "state_dict": model.state_dict(), "val_f1": best_f1}, best_ckpt_path)
-            print_file(f"           ↳ new best val_f1={best_f1:.4f}  (saved {best_ckpt_path.name})")
+            torch.save(
+                {"epoch": epoch, "state_dict": model.state_dict(), "val_f1": best_f1},
+                best_ckpt_path,
+            )
+            print_file(
+                f"           ↳ new best val_f1={best_f1:.4f}"
+                f"  (saved {best_ckpt_path.name})"
+            )
         else:
             no_improve += 1
             if early_stop_patience is not None and no_improve >= early_stop_patience:
-                print_file(f"           ↳ early stop: no improvement for {early_stop_patience} epochs")
+                print_file(
+                    "           ↳ early stop: no improvement for"
+                    f" {early_stop_patience} epochs"
+                )
                 break
 
         with history_path.open("w") as f:
@@ -344,20 +374,25 @@ def train(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train GIN_PPI")
-    p.add_argument("--ppi",     required=True, type=Path, help="STRING PPI tsv")
-    p.add_argument("--esm",     required=True, type=Path, help="precomputed ESM-2 embeddings .pt")
-    p.add_argument("--pathway", type=Path,     default=None, help="pathway embeddings .pt (optional)")
+    p.add_argument("--ppi", required=True, type=Path, help="STRING PPI tsv")
+    p.add_argument(
+        "--esm", required=True, type=Path, help="precomputed ESM-2 embeddings .pt"
+    )
+    p.add_argument(
+        "--pathway", type=Path, default=None, help="pathway embeddings .pt (optional)"
+    )
     p.add_argument("--out-dir", required=True, type=Path)
-    p.add_argument("--epochs",     type=int,   default=100)
-    p.add_argument("--batch-size", type=int,   default=512)
-    p.add_argument("--lr",         type=float, default=1e-3)
+    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--batch-size", type=int, default=512)
+    p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--device",     default="auto", choices=["auto", "cuda", "mps", "cpu"])
-    p.add_argument("--split",      default="random", choices=["random", "bfs", "dfs"])
-    p.add_argument("--test-size",  type=float, default=0.2)
-    p.add_argument("--seed",       type=int, default=1)
+    p.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"])
+    p.add_argument("--split", default="random", choices=["random", "bfs", "dfs"])
+    p.add_argument("--test-size", type=float, default=0.2)
+    p.add_argument("--seed", type=int, default=1)
     p.add_argument("--early-stop", type=int, default=20)
     p.add_argument("--no-tensorboard", action="store_true")
     return p.parse_args(argv)
@@ -365,7 +400,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
-    print(f"[main] loading dataset from:")
+    print("[main] loading dataset from:")
     print(f"         ppi={args.ppi}")
     print(f"         esm={args.esm}")
     print(f"         pathway={args.pathway}")
@@ -376,9 +411,11 @@ def main(argv: list[str] | None = None) -> int:
         pathway_emb_path=args.pathway,
         verbose=True,
     )
-    print(f"[main] proteins: {len(dataset.protein_to_idx)}, "
-          f"unique edges: {len(dataset.edge_attr)}, "
-          f"components: {dataset.count_components()}")
+    print(
+        f"[main] proteins: {len(dataset.protein_to_idx)}, "
+        f"unique edges: {len(dataset.edge_attr or [])}, "
+        f"components: {dataset.count_components()}"
+    )
 
     result = train(
         dataset=dataset,

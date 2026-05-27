@@ -19,7 +19,16 @@ Usage (from orchestrator)
         config={"configurable": {"thread_id": "..."}},
     )
 """
+
 from __future__ import annotations
+
+# Load .env from the project root so OLLAMA_MODEL etc. don't need manual export.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
 
 from langgraph.graph import END, StateGraph
 
@@ -36,7 +45,7 @@ def build_rag_chat_graph() -> StateGraph:
     workflow = StateGraph(RagChatState)
 
     workflow.add_node("collect_query", graph_node_collect_query)
-    workflow.add_node("rag_answer",    graph_node_rag_answer)
+    workflow.add_node("rag_answer", graph_node_rag_answer)
 
     workflow.set_entry_point("collect_query")
 
@@ -58,19 +67,55 @@ def build_rag_chat_graph() -> StateGraph:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import argparse
+    from pathlib import Path
+
     from langgraph.checkpoint.memory import MemorySaver
 
-    print("=== RAG Q&A smoke test (type a question, Enter to quit) ===\n")
-    memory = MemorySaver()
-    graph  = build_rag_chat_graph().compile(checkpointer=memory)
+    from scripts.rag.pipeline_context import assemble_pipeline_results
 
-    # Minimal pipeline context mimicking what the orchestrator would pass
-    initial = {
-        "pipeline_context": {
-            "n_deg_significant": 23,
-            "child_summary": "Bulk RNA-seq pipeline finished with 23 significant DEGs.",
-        },
-        "should_quit": False,
+    p = argparse.ArgumentParser(description="Standalone RAG Q&A chat")
+    p.add_argument("--deg-full", default="runs/demo_bulk_v2/06_deg/deseq2_full.tsv")
+    p.add_argument(
+        "--deg-sig", default="runs/demo_bulk_v2/06_deg/deseq2_significant.tsv"
+    )
+    p.add_argument("--inference", default=None)
+    p.add_argument("--n-deg", type=int, default=None)
+    args = p.parse_args()
+
+    # Load real pipeline results from the most recent demo run
+    pipeline_results = assemble_pipeline_results(
+        deg_full_path=args.deg_full if Path(args.deg_full).exists() else None,
+        deg_sig_path=args.deg_sig if Path(args.deg_sig).exists() else None,
+        n_deg_significant=args.n_deg,
+        inference_path=args.inference,
+        n_samples_ok=None,
+        conditions=None,
+    )
+
+    pipeline_ctx = {
+        "deg_sig_path": args.deg_sig if Path(args.deg_sig).exists() else None,
+        "n_deg_significant": args.n_deg,
+        "child_summary": "",
     }
-    graph.invoke(initial, config={"configurable": {"thread_id": "rag_smoke"}})
+
+    print("=== RAG Q&A (standalone) ===")
+    if pipeline_results.get("n_genes_tested"):
+        print(f"    Genes tested : {pipeline_results['n_genes_tested']}")
+    if pipeline_results.get("n_deg_significant") is not None:
+        print(f"    Sig DEGs     : {pipeline_results['n_deg_significant']}")
+    if pipeline_results.get("inference_n_predicted") is not None:
+        print(f"    PPI predicted: {pipeline_results['inference_n_predicted']}")
+    print("    Type a biology question, or press Enter to quit.\n")
+
+    memory = MemorySaver()
+    graph = build_rag_chat_graph().compile(checkpointer=memory)
+    graph.invoke(
+        {
+            "pipeline_context": pipeline_ctx,
+            "pipeline_results": pipeline_results,
+            "should_quit": False,
+        },
+        config={"configurable": {"thread_id": "rag_standalone"}},
+    )
     print("=== Q&A session ended ===")

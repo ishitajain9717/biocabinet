@@ -34,6 +34,7 @@ DESIGN:
     against documents the caller doesn't want.  This makes gene-centric
     retrieval fast even if the corpus grows.
 """
+
 from __future__ import annotations
 
 import json
@@ -42,33 +43,33 @@ from typing import Optional
 
 import numpy as np
 
-
 # ---------------------------------------------------------------------------
 # default paths (relative to project root)
 # ---------------------------------------------------------------------------
 
-DEFAULT_INDEX_DIR  = Path("data/rag")
-DEFAULT_BIOBERT    = "dmis-lab/biobert-v1.1"
-DEFAULT_MAX_LEN    = 256
+DEFAULT_INDEX_DIR = Path("data/rag")
+DEFAULT_BIOBERT = "dmis-lab/biobert-v1.1"
+DEFAULT_MAX_LEN = 256
 
 
 # ---------------------------------------------------------------------------
 # Retriever
 # ---------------------------------------------------------------------------
 
+
 class Retriever:
     """Loads the RAG index once and answers cosine-similarity queries."""
 
     def __init__(
         self,
-        index_dir:    Path = DEFAULT_INDEX_DIR,
+        index_dir: Path = DEFAULT_INDEX_DIR,
         biobert_model: str = DEFAULT_BIOBERT,
-        max_seq_len:   int = DEFAULT_MAX_LEN,
-        device:        str = "cpu",
+        max_seq_len: int = DEFAULT_MAX_LEN,
+        device: str = "cpu",
     ) -> None:
         self.biobert_model = biobert_model
-        self.max_seq_len   = max_seq_len
-        self.device        = device
+        self.max_seq_len = max_seq_len
+        self.device = device
 
         # Load documents
         docs_path = index_dir / "docs.jsonl"
@@ -78,7 +79,9 @@ class Retriever:
                 "Run `python -m scripts.rag.build_index` first."
             )
         self.docs: list[dict] = [
-            json.loads(line) for line in docs_path.read_text().splitlines() if line.strip()
+            json.loads(line)
+            for line in docs_path.read_text().splitlines()
+            if line.strip()
         ]
 
         # Load embeddings — shape (N, D), float32
@@ -92,7 +95,7 @@ class Retriever:
 
         # Pre-normalise rows so cosine = dot product
         norms = np.linalg.norm(self._embeddings, axis=1, keepdims=True)
-        norms = np.where(norms == 0, 1.0, norms)   # avoid div-by-zero
+        norms = np.where(norms == 0, 1.0, norms)  # avoid div-by-zero
         self._embeddings_norm = self._embeddings / norms
 
         # Load gene reverse index
@@ -105,8 +108,8 @@ class Retriever:
         self._id_to_row: dict[str, int] = {d["id"]: i for i, d in enumerate(self.docs)}
 
         # BioBERT tokenizer + model — lazy loaded on first retrieve()
-        self._tokenizer = None
-        self._model     = None
+        self._tokenizer: Optional[object] = None
+        self._model: Optional[object] = None
 
     # ------------------------------------------------------------------
     # public API
@@ -114,8 +117,8 @@ class Retriever:
 
     def retrieve(
         self,
-        query:       str,
-        k:           int = 8,
+        query: str,
+        k: int = 8,
         gene_filter: Optional[list[str] | set[str]] = None,
     ) -> list[dict]:
         """Return top-k documents most similar to query.
@@ -140,42 +143,45 @@ class Retriever:
                 candidate_rows = np.arange(len(self.docs))
             else:
                 candidate_rows = np.array(
-                    [self._id_to_row[doc_id] for doc_id in candidate_ids
-                     if doc_id in self._id_to_row],
+                    [
+                        self._id_to_row[doc_id]
+                        for doc_id in candidate_ids
+                        if doc_id in self._id_to_row
+                    ],
                     dtype=np.int64,
                 )
         else:
             candidate_rows = np.arange(len(self.docs))
 
         # 2. Embed the query
-        q_vec = self._embed_query(query)   # shape (D,)
+        q_vec = self._embed_query(query)  # shape (D,)
 
         # 3. Cosine similarity against candidate rows
-        candidate_embs = self._embeddings_norm[candidate_rows]   # (M, D)
-        scores = candidate_embs @ q_vec                          # (M,)
+        candidate_embs = self._embeddings_norm[candidate_rows]  # (M, D)
+        scores = candidate_embs @ q_vec  # (M,)
 
         # 4. Top-k
         top_k = min(k, len(scores))
-        top_idx = np.argpartition(scores, -top_k)[-top_k:]       # fast partial sort
-        top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]     # sort descending
+        top_idx = np.argpartition(scores, -top_k)[-top_k:]  # fast partial sort
+        top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]  # sort descending
 
         # 5. Assemble results
         results = []
         for rank, local_idx in enumerate(top_idx, start=1):
-            row   = int(candidate_rows[local_idx])
+            row = int(candidate_rows[local_idx])
             score = float(scores[local_idx])
-            doc   = dict(self.docs[row])   # shallow copy so we don't mutate
+            doc = dict(self.docs[row])  # shallow copy so we don't mutate
             doc["score"] = round(score, 4)
-            doc["rank"]  = rank
+            doc["rank"] = rank
             results.append(doc)
 
         return results
 
     def retrieve_for_genes(
         self,
-        genes:   list[str],
-        k:       int = 8,
-        query:   str = "",
+        genes: list[str],
+        k: int = 8,
+        query: str = "",
     ) -> list[dict]:
         """Convenience wrapper: retrieve docs for a gene list.
 
@@ -183,7 +189,9 @@ class Retriever:
         Useful when you have a DEG list but no specific question.
         """
         if not query:
-            query = f"biological pathways and functions of genes: {', '.join(genes[:20])}"
+            query = (
+                f"biological pathways and functions of genes: {', '.join(genes[:20])}"
+            )
         return self.retrieve(query=query, k=k, gene_filter=genes)
 
     # ------------------------------------------------------------------
@@ -195,18 +203,21 @@ class Retriever:
         self._lazy_load_biobert()
         import torch
 
-        enc = self._tokenizer(
+        assert self._tokenizer is not None and self._model is not None
+        enc = self._tokenizer(  # type: ignore[operator]
             [text],
-            padding=True, truncation=True,
-            max_length=self.max_seq_len, return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self.max_seq_len,
+            return_tensors="pt",
         ).to(self.device)
 
         with torch.no_grad():
-            hidden = self._model(**enc).last_hidden_state   # (1, L, D)
-            mask   = enc["attention_mask"].unsqueeze(-1)    # (1, L, 1)
+            hidden = self._model(**enc).last_hidden_state  # type: ignore[operator]
+            mask = enc["attention_mask"].unsqueeze(-1)  # (1, L, 1)
             pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
 
-        vec = pooled[0].cpu().numpy()                       # (D,)
+        vec = pooled[0].cpu().numpy()  # (D,)
         norm = np.linalg.norm(vec)
         return vec / norm if norm > 0 else vec
 
@@ -214,14 +225,13 @@ class Retriever:
         if self._tokenizer is not None:
             return
         try:
-            from transformers import AutoModel, AutoTokenizer
+            from transformers import AutoTokenizer
         except ImportError as e:
             raise SystemExit(
-                f"transformers not installed: {e}\n"
-                "pip install transformers torch"
+                f"transformers not installed: {e}\n" "pip install transformers torch"
             ) from e
         self._tokenizer = AutoTokenizer.from_pretrained(self.biobert_model)
-        self._model     = (
+        self._model = (
             __import__("transformers")
             .AutoModel.from_pretrained(self.biobert_model)
             .to(self.device)
@@ -237,7 +247,7 @@ _default_retriever: Optional[Retriever] = None
 
 
 def get_retriever(
-    index_dir:    Path = DEFAULT_INDEX_DIR,
+    index_dir: Path = DEFAULT_INDEX_DIR,
     biobert_model: str = DEFAULT_BIOBERT,
 ) -> Retriever:
     """Return a cached Retriever instance (loads index once per process)."""
@@ -253,11 +263,16 @@ def get_retriever(
 
 if __name__ == "__main__":
     import sys
+
     query = " ".join(sys.argv[1:]) or "cell cycle regulation CDK4 CCND1"
     print(f"Query: {query!r}\n")
     r = Retriever()
     hits = r.retrieve(query, k=5)
     for h in hits:
-        print(f"[{h['rank']}] score={h['score']:.4f}  {h['source']:10s}  {h['pathway_name']}")
+        print(
+            f"[{h['rank']}] score={h['score']:.4f}  "
+            f"{h['source']:10s}  "
+            f"{h['pathway_name']}"
+        )
         print(f"     {h['text'][:120]}...")
         print()

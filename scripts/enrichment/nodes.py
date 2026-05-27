@@ -10,17 +10,16 @@ Each node rebuilds the GNNDataset from disk (cheap: ~3 sec for SHS27k)
 so the LangGraph state never has to hold a PyG Data object. This is the
 same disk-passing pattern the scRNA-seq pipeline uses for AnnData.
 """
+
 from __future__ import annotations
 
-from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional
 
 from scripts.common.node_result import NodeResult
 from scripts.enrichment.config import EnrichmentConfig
 
-
 # ---------- node 1: load_data ----------
+
 
 def node_load_data(cfg: EnrichmentConfig) -> NodeResult:
     """Build the GNNDataset once to validate inputs and return summary stats.
@@ -39,11 +38,11 @@ def node_load_data(cfg: EnrichmentConfig) -> NodeResult:
             pathway_emb_path=cfg.pathway_path,
             verbose=False,
         )
-        n_proteins   = dataset.num_nodes
-        n_edges_uni  = dataset.num_unique_edges
+        n_proteins = dataset.num_nodes
+        n_edges_uni = dataset.num_unique_edges
         n_components = dataset.count_components()
-        esm_dim      = dataset.esm_dim
-        pathway_dim  = dataset.pathway_x.shape[1] if dataset.pathway_x is not None else 0
+        esm_dim = dataset.esm_dim
+        pathway_dim = dataset.pathway_x.shape[1] if dataset.pathway_x is not None else 0
 
         if dataset.pathway_x is not None and pathway_dim > 0:
             row_norms = dataset.pathway_x.norm(dim=1)
@@ -67,22 +66,23 @@ def node_load_data(cfg: EnrichmentConfig) -> NodeResult:
             f"pathway_coverage={pathway_coverage:.3f}"
         ),
         outputs={
-            "ppi_path":     str(cfg.ppi_path),
-            "esm_path":     str(cfg.esm_path),
-            "pathway_path": str(cfg.pathway_path) if cfg.pathway_path else None,
+            "ppi_path": str(cfg.ppi_path),
+            "esm_path": str(cfg.esm_path),
+            "pathway_path": str(cfg.pathway_path) if cfg.pathway_path else "",
         },
         metrics={
-            "n_proteins":       n_proteins,
-            "n_edges":          n_edges_uni,
-            "n_components":     n_components,
-            "esm_dim":          esm_dim,
-            "pathway_dim":      pathway_dim,
+            "n_proteins": n_proteins,
+            "n_edges": n_edges_uni,
+            "n_components": n_components,
+            "esm_dim": esm_dim,
+            "pathway_dim": pathway_dim,
             "pathway_coverage": pathway_coverage,
         },
     )
 
 
 # ---------- node 2: train ----------
+
 
 def node_train(cfg: EnrichmentConfig) -> NodeResult:
     """Train GIN_PPI on the configured PPI dataset.
@@ -91,7 +91,7 @@ def node_train(cfg: EnrichmentConfig) -> NodeResult:
     ``training_history.json`` under ``cfg.out_dir``.
     """
     try:
-        from scripts.enrichment.gnn_data  import GNNDataset
+        from scripts.enrichment.gnn_data import GNNDataset
         from scripts.enrichment.gnn_train import train as run_train
 
         dataset = GNNDataset(
@@ -132,20 +132,21 @@ def node_train(cfg: EnrichmentConfig) -> NodeResult:
         outputs={
             "best_ckpt": str(result.best_ckpt_path),
             "last_ckpt": str(result.last_ckpt_path),
-            "history":   str(result.history_path),
+            "history": str(result.history_path),
         },
         metrics={
             "best_val_f1": result.best_f1,
-            "best_epoch":  result.best_epoch,
-            "n_train":     result.n_train,
-            "n_val":       result.n_val,
-            "n_params":    result.n_params,
-            "device":      result.device,
+            "best_epoch": result.best_epoch,
+            "n_train": result.n_train,
+            "n_val": result.n_val,
+            "n_params": result.n_params,
+            "device": result.device,
         },
     )
 
 
 # ---------- node 3: eval ----------
+
 
 def node_eval(cfg: EnrichmentConfig, ckpt_path: Path) -> NodeResult:
     """Bucketed evaluation (test1/2/3) of the trained checkpoint."""
@@ -186,18 +187,19 @@ def node_eval(cfg: EnrichmentConfig, ckpt_path: Path) -> NodeResult:
         ),
         outputs={"metrics_path": str(out_path)},
         metrics={
-            "all_f1":   all_metrics["f1"],
+            "all_f1": all_metrics["f1"],
             "test1_f1": buckets["test1"]["f1"],
             "test2_f1": buckets["test2"]["f1"],
             "test3_f1": buckets["test3"]["f1"],
-            "n_train":  summary["n_train"],
-            "n_val":    summary["n_val"],
-            "buckets":  buckets,
+            "n_train": summary["n_train"],
+            "n_val": summary["n_val"],
+            "buckets": buckets,
         },
     )
 
 
 # ---------- node 4: infer ----------
+
 
 def node_infer(cfg: EnrichmentConfig, ckpt_path: Path) -> NodeResult:
     """Predict interaction types for novel candidate ENSP pairs.
@@ -244,9 +246,9 @@ def node_infer(cfg: EnrichmentConfig, ckpt_path: Path) -> NodeResult:
         ),
         outputs={"inference_path": str(out_path)},
         metrics={
-            "n_pairs_in":   summary["n_pairs"],
-            "n_predicted":  summary["n_predicted"],
-            "n_skipped":    summary["n_skipped"],
-            "threshold":    summary["threshold"],
+            "n_pairs_in": summary["n_pairs"],
+            "n_predicted": summary["n_predicted"],
+            "n_skipped": summary["n_skipped"],
+            "threshold": summary["threshold"],
         },
     )
