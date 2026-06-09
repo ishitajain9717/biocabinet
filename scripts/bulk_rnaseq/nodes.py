@@ -1,18 +1,21 @@
 """Pipeline nodes: each function runs one tool and returns a NodeResult."""
+
 from __future__ import annotations
 
+import re
 import subprocess
+import zipfile
 from pathlib import Path
 from typing import Optional
 
 from scripts.bulk_rnaseq.config import PreprocessingConfig, Sample
 from scripts.common.node_result import NodeResult
 
-
 _STRAND_MAP = {"unstranded": "0", "forward": "1", "reverse": "2"}
 
 
 # ---------- internal helpers ----------
+
 
 def _run(cmd: list[str]) -> tuple[str, str, int]:
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -23,7 +26,117 @@ def _tail(text: str, n: int = 200) -> str:
     return text[-n:] if text else ""
 
 
+# ---------- FastQC report parser ----------
+
+
+def _parse_fastqc_report(qc_dir: Path, sample_name: str) -> dict:
+    """Extract module statuses and key metrics from a FastQC zip report.
+
+    Returns a dict with:
+        module_statuses : {module_name: "pass"|"warn"|"fail"}
+        total_sequences : int
+        pct_gc          : float
+        mean_quality    : float  (median of Per Sequence Quality Scores peak)
+        pct_duplicates  : float
+        pct_adapter     : float  (max adapter content across bases)
+        raw_summary     : str    (first 2000 chars of fastqc_data.txt)
+    """
+    result: dict = {
+        "module_statuses": {},
+        "total_sequences": None,
+        "pct_gc": None,
+        "mean_quality": None,
+        "pct_duplicates": None,
+        "pct_adapter": None,
+        "raw_summary": "",
+    }
+
+    # FastQC creates <stem>_fastqc.zip for each input file
+    zips = list(qc_dir.glob("*_fastqc.zip"))
+    if not zips:
+        return result
+
+    # Use the first zip (R1); R2 parsed separately if needed
+    zip_path = zips[0]
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            # fastqc_data.txt is inside <stem>_fastqc/fastqc_data.txt
+            data_files = [n for n in zf.namelist() if n.endswith("fastqc_data.txt")]
+            if not data_files:
+                return result
+            content = zf.read(data_files[0]).decode("utf-8", errors="replace")
+    except Exception:
+        return result
+
+    result["raw_summary"] = content[:2000]
+
+    # Parse >>Module Name\tstatus lines
+    for line in content.splitlines():
+        if line.startswith(">>") and not line.startswith(">>END"):
+            parts = line[2:].split("\t")
+            if len(parts) == 2:
+                module, status = parts
+                result["module_statuses"][module] = status.strip()
+
+    # Extract Total Sequences from Basic Statistics table
+    m = re.search(r"Total Sequences\s+(\d+)", content)
+    if m:
+        result["total_sequences"] = int(m.group(1))
+
+    # Extract %GC
+    m = re.search(r"%GC\s+(\d+)", content)
+    if m:
+        result["pct_gc"] = float(m.group(1))
+
+    # Extract % duplication (Sequence Duplication Levels block)
+    m = re.search(r"#Total Deduplicated Percentage\s+([\d.]+)", content)
+    if m:
+        result["pct_duplicates"] = round(100 - float(m.group(1)), 1)
+
+    # Extract mean quality — peak of Per Sequence Quality Scores
+    in_quality_block = False
+    quality_counts: list[tuple[float, float]] = []
+    for line in content.splitlines():
+        if line.startswith(">>Per sequence quality scores"):
+            in_quality_block = True
+            continue
+        if in_quality_block and line.startswith(">>END MODULE"):
+            break
+        if in_quality_block and not line.startswith("#") and line.strip():
+            parts = line.split("\t")
+            if len(parts) == 2:
+                try:
+                    quality_counts.append((float(parts[0]), float(parts[1])))
+                except ValueError:
+                    pass
+    if quality_counts:
+        peak_q = max(quality_counts, key=lambda x: x[1])[0]
+        result["mean_quality"] = peak_q
+
+    # Extract max adapter content (Adapter Content block)
+    in_adapter_block = False
+    max_adapter = 0.0
+    for line in content.splitlines():
+        if line.startswith(">>Adapter Content"):
+            in_adapter_block = True
+            continue
+        if in_adapter_block and line.startswith(">>END MODULE"):
+            break
+        if in_adapter_block and not line.startswith("#") and line.strip():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                try:
+                    vals = [float(p) for p in parts[1:]]
+                    max_adapter = max(max_adapter, max(vals))
+                except ValueError:
+                    pass
+    result["pct_adapter"] = round(max_adapter, 2)
+
+    return result
+
+
 # ---------- nodes ----------
+
 
 def node_fastqc(cfg: PreprocessingConfig, sample: Sample) -> NodeResult:
     out_dir = cfg.out_dir / "01_qc" / sample.name
@@ -34,17 +147,54 @@ def node_fastqc(cfg: PreprocessingConfig, sample: Sample) -> NodeResult:
         cmd.append(str(sample.r2))
 
     _, err, rc = _run(cmd)
+    if rc != 0:
+        return NodeResult(
+            name="fastqc",
+            ok=False,
+            message=_tail(err),
+            outputs={"qc_dir": str(out_dir)},
+            metrics={"returncode": rc},
+        )
+
+    report = _parse_fastqc_report(out_dir, sample.name)
     return NodeResult(
         name="fastqc",
-        ok=(rc == 0),
-        message="ok" if rc == 0 else _tail(err),
+        ok=True,
+        message="ok",
         outputs={"qc_dir": str(out_dir)},
-        metrics={"returncode": rc},
+        metrics={
+            "returncode": rc,
+            "module_statuses": report["module_statuses"],
+            "total_sequences": report["total_sequences"],
+            "pct_gc": report["pct_gc"],
+            "mean_quality": report["mean_quality"],
+            "pct_duplicates": report["pct_duplicates"],
+            "pct_adapter": report["pct_adapter"],
+            "raw_summary": report["raw_summary"],
+        },
     )
 
 
-def node_trim(cfg: PreprocessingConfig, sample: Sample) -> NodeResult:
-    if cfg.skip_trim:
+def node_trim(
+    cfg: PreprocessingConfig,
+    sample: Sample,
+    trim_steps: list[str] | None = None,
+) -> NodeResult:
+    """Run Trimmomatic (or skip) for a single sample.
+
+    Parameters
+    ----------
+    trim_steps:
+        Trimmomatic step tokens, e.g.
+        ["ILLUMINACLIP:adapters.fa:2:30:10", "LEADING:20",
+         "TRAILING:20", "SLIDINGWINDOW:4:15", "MINLEN:36"].
+        When None the hardcoded defaults are used.
+        When empty-list the run is treated as skip.
+    """
+    # Determine effective skip flag: LLM pass empty list → skip trim
+    effective_skip = cfg.skip_trim if trim_steps is None else (len(trim_steps) == 0)
+
+    if effective_skip:
         outs: dict[str, str] = {"r1": str(sample.r1)}
         if sample.r2 is not None:
             outs["r2"] = str(sample.r2)
@@ -57,6 +207,18 @@ def node_trim(cfg: PreprocessingConfig, sample: Sample) -> NodeResult:
             message="trimmomatic_jar is required when skip_trim=False",
         )
 
+    # Default steps when none provided (conservative safe defaults)
+    steps = (
+        trim_steps
+        if trim_steps
+        else [
+            "LEADING:3",
+            "TRAILING:3",
+            "SLIDINGWINDOW:4:15",
+            "MINLEN:36",
+        ]
+    )
+
     trim_dir = cfg.out_dir / "02_trim" / sample.name
     trim_dir.mkdir(parents=True, exist_ok=True)
 
@@ -66,34 +228,46 @@ def node_trim(cfg: PreprocessingConfig, sample: Sample) -> NodeResult:
         r1_unp = trim_dir / f"{sample.name}.R1_unpaired.fastq.gz"
         r2_unp = trim_dir / f"{sample.name}.R2_unpaired.fastq.gz"
         cmd = [
-            "java", "-jar", str(cfg.trimmomatic_jar),
-            "PE", "-threads", str(cfg.threads),
-            str(sample.r1), str(sample.r2),
-            str(r1_out), str(r1_unp),
-            str(r2_out), str(r2_unp),
-        ]
+            "java",
+            "-jar",
+            str(cfg.trimmomatic_jar),
+            "PE",
+            "-threads",
+            str(cfg.threads),
+            str(sample.r1),
+            str(sample.r2),
+            str(r1_out),
+            str(r1_unp),
+            str(r2_out),
+            str(r2_unp),
+        ] + steps
         _, err, rc = _run(cmd)
         return NodeResult(
             name="trim",
             ok=(rc == 0 and r1_out.exists() and r2_out.exists()),
             message="ok" if rc == 0 else _tail(err),
             outputs={"r1": str(r1_out), "r2": str(r2_out)},
-            metrics={"returncode": rc},
+            metrics={"returncode": rc, "trim_steps": steps},
         )
 
     r1_out = trim_dir / f"{sample.name}.R1_trimmed.fastq.gz"
     cmd = [
-        "java", "-jar", str(cfg.trimmomatic_jar),
-        "SE", "-threads", str(cfg.threads),
-        str(sample.r1), str(r1_out),
-    ]
+        "java",
+        "-jar",
+        str(cfg.trimmomatic_jar),
+        "SE",
+        "-threads",
+        str(cfg.threads),
+        str(sample.r1),
+        str(r1_out),
+    ] + steps
     _, err, rc = _run(cmd)
     return NodeResult(
         name="trim",
         ok=(rc == 0 and r1_out.exists()),
         message="ok" if rc == 0 else _tail(err),
         outputs={"r1": str(r1_out)},
-        metrics={"returncode": rc},
+        metrics={"returncode": rc, "trim_steps": steps},
     )
 
 
@@ -113,17 +287,23 @@ def node_align(
 
     cmd = [
         "STAR",
-        "--runThreadN", str(cfg.threads),
-        "--genomeDir", str(cfg.genome_dir),
-        "--readFilesIn", str(r1),
+        "--runThreadN",
+        str(cfg.threads),
+        "--genomeDir",
+        str(cfg.genome_dir),
+        "--readFilesIn",
+        str(r1),
     ]
     if r2 is not None:
         cmd.append(str(r2))
     if str(r1).endswith(".gz"):
         cmd += ["--readFilesCommand", "gunzip", "-c"]
     cmd += [
-        "--outSAMtype", "BAM", "SortedByCoordinate",
-        "--outFileNamePrefix", str(prefix),
+        "--outSAMtype",
+        "BAM",
+        "SortedByCoordinate",
+        "--outFileNamePrefix",
+        str(prefix),
     ]
 
     _, err, rc = _run(cmd)
@@ -166,13 +346,20 @@ def node_featurecounts(
     strand_flag = _STRAND_MAP.get(cfg.strand, "0")
     cmd = [
         "featureCounts",
-        "-T", str(cfg.threads),
-        "-a", str(cfg.gtf),
-        "-F", "GTF",
-        "-t", "exon",
-        "-g", "gene_id",
-        "-s", strand_flag,
-        "-o", str(out_file),
+        "-T",
+        str(cfg.threads),
+        "-a",
+        str(cfg.gtf),
+        "-F",
+        "GTF",
+        "-t",
+        "exon",
+        "-g",
+        "gene_id",
+        "-s",
+        strand_flag,
+        "-o",
+        str(out_file),
     ]
     if sample.r2 is not None:
         cmd.append("-p")
@@ -199,6 +386,7 @@ def node_featurecounts(
 
 
 # ---------- normalization ----------
+
 
 def _parse_counts(counts_txt: Path) -> tuple[list[str], list[int], list[int]]:
     """Parse a featureCounts output file.
@@ -235,10 +423,7 @@ def _compute_fpkm_rpkm(counts: list[int], lengths: list[int]) -> list[float]:
     lib_size = sum(counts)
     if lib_size == 0:
         return [0.0] * len(counts)
-    return [
-        c * 1e9 / (l * lib_size) if l > 0 else 0.0
-        for c, l in zip(counts, lengths)
-    ]
+    return [c * 1e9 / (l * lib_size) if l > 0 else 0.0 for c, l in zip(counts, lengths)]
 
 
 def _write_tsv(path: Path, header: list[str], rows: list[list]) -> None:
@@ -293,7 +478,9 @@ def node_normalize(
     norm_header = ["gene_id"] + sample_names
 
     if "tpm" in cfg.normalizations:
-        tpm_by_sample = {s: _compute_tpm(sample_counts[s], all_lengths) for s in sample_names}
+        tpm_by_sample = {
+            s: _compute_tpm(sample_counts[s], all_lengths) for s in sample_names
+        }
         tpm_tsv = norm_dir / "tpm.tsv"
         tpm_rows: list[list] = [
             [all_gene_ids[i]] + [round(tpm_by_sample[s][i], 6) for s in sample_names]
@@ -311,7 +498,8 @@ def node_normalize(
                 continue
             out_tsv = norm_dir / f"{norm}.tsv"
             out_rows: list[list] = [
-                [all_gene_ids[i]] + [round(fpkm_by_sample[s][i], 6) for s in sample_names]
+                [all_gene_ids[i]]
+                + [round(fpkm_by_sample[s][i], 6) for s in sample_names]
                 for i in range(n_genes)
             ]
             _write_tsv(out_tsv, norm_header, out_rows)
@@ -328,6 +516,7 @@ def node_normalize(
 
 # ---------- DEG (PyDESeq2) ----------
 
+
 def _strip_ensembl_version(gene_id: str) -> str:
     """ENSG00000123456.5 → ENSG00000123456 (mygene lookups want unversioned IDs)."""
     return gene_id.split(".", 1)[0]
@@ -338,8 +527,8 @@ def _read_counts_raw(raw_tsv: Path) -> tuple[list[str], list[str], list[list[int
 
     Returns (gene_ids, sample_names, matrix as gene-major rows of ints).
     """
-    gene_ids:    list[str] = []
-    matrix:      list[list[int]] = []
+    gene_ids: list[str] = []
+    matrix: list[list[int]] = []
     sample_names: list[str] = []
     with raw_tsv.open() as fh:
         header = fh.readline().rstrip("\n").split("\t")
@@ -354,21 +543,26 @@ def _read_counts_raw(raw_tsv: Path) -> tuple[list[str], list[str], list[list[int
 
 def _build_deg_pairs_tsv(
     significant_genes: list[str],
-    out_path:          Path,
-    max_pairs:         int = 5000,
+    out_path: Path,
+    max_pairs: int = 5000,
 ) -> tuple[int, int, int]:
     """Map ENSG → ENSP via mygene, build all combinations, cap at max_pairs.
 
     Returns (n_genes_mapped, n_total_ensps, n_pairs_written).
     """
     from itertools import combinations
+
     import mygene
+
     mg = mygene.MyGeneInfo()
 
     bare_genes = [_strip_ensembl_version(g) for g in significant_genes]
     results = mg.querymany(
-        bare_genes, scopes="ensembl.gene", fields="ensembl.protein",
-        species="human", verbose=False,
+        bare_genes,
+        scopes="ensembl.gene",
+        fields="ensembl.protein",
+        species="human",
+        verbose=False,
     )
 
     all_ensps: list[str] = []
@@ -409,7 +603,7 @@ def _build_deg_pairs_tsv(
 
 
 def node_deg(
-    cfg:          PreprocessingConfig,
+    cfg: PreprocessingConfig,
     raw_counts_path: Path,
 ) -> NodeResult:
     """Differential expression analysis with PyDESeq2.
@@ -496,9 +690,9 @@ def node_deg(
     try:
         # Lazy heavy imports — only paid when this node actually runs.
         import pandas as pd
-        from pydeseq2.dds  import DeseqDataSet
-        from pydeseq2.ds   import DeseqStats
+        from pydeseq2.dds import DeseqDataSet
         from pydeseq2.default_inference import DefaultInference
+        from pydeseq2.ds import DeseqStats
 
         gene_ids, sample_names, matrix = _read_counts_raw(raw_counts_path)
 
@@ -551,17 +745,17 @@ def node_deg(
         gene_list_txt.write_text("\n".join(sig_df.index.tolist()) + "\n")
 
         outputs = {
-            "deseq2_full":        str(full_tsv),
+            "deseq2_full": str(full_tsv),
             "deseq2_significant": str(sig_tsv),
-            "deg_gene_list":      str(gene_list_txt),
+            "deg_gene_list": str(gene_list_txt),
         }
         metrics = {
-            "n_genes_tested":    int(res_df.shape[0]),
-            "n_significant":     int(sig_df.shape[0]),
-            "padj_threshold":    cfg.padj_threshold,
-            "lfc_threshold":     cfg.lfc_threshold,
-            "treated":           treated,
-            "reference":         cfg.reference_condition,
+            "n_genes_tested": int(res_df.shape[0]),
+            "n_significant": int(sig_df.shape[0]),
+            "padj_threshold": cfg.padj_threshold,
+            "lfc_threshold": cfg.lfc_threshold,
+            "treated": treated,
+            "reference": cfg.reference_condition,
         }
         msg_parts = [
             f"DESeq2 done: {sig_df.shape[0]} sig genes "
@@ -575,16 +769,20 @@ def node_deg(
             try:
                 pairs_tsv = out_dir / "deg_pairs.tsv"
                 n_mapped, n_ensps, n_pairs = _build_deg_pairs_tsv(
-                    sig_df.index.tolist(), pairs_tsv,
+                    sig_df.index.tolist(),
+                    pairs_tsv,
                 )
                 outputs["deg_pairs"] = str(pairs_tsv)
-                metrics.update({
-                    "deg_pairs_n_genes_mapped": n_mapped,
-                    "deg_pairs_n_ensps":        n_ensps,
-                    "deg_pairs_n_written":      n_pairs,
-                })
+                metrics.update(
+                    {
+                        "deg_pairs_n_genes_mapped": n_mapped,
+                        "deg_pairs_n_ensps": n_ensps,
+                        "deg_pairs_n_written": n_pairs,
+                    }
+                )
                 msg_parts.append(
-                    f"; mapped {n_mapped} genes to {n_ensps} ENSPs → {n_pairs} candidate pairs"
+                    f"; mapped {n_mapped} genes to {n_ensps} ENSPs"
+                    f" → {n_pairs} candidate pairs"
                 )
             except Exception as exc:
                 # Don't fail the whole DEG node just because the pair builder hit

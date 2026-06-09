@@ -66,6 +66,46 @@ def build_rag_chat_graph() -> StateGraph:
 # standalone smoke test
 # ---------------------------------------------------------------------------
 
+
+def _find_latest_deg_run(runs_dir: "Path") -> "dict":
+    """Scan runs/ and return paths for the most recent run that has DEGs."""
+    import glob as _glob
+    from pathlib import Path as _Path
+
+    best: dict = {}
+    for sig in sorted(
+        _glob.glob(str(runs_dir / "**/deseq2_significant.tsv"), recursive=True),
+        key=lambda p: _Path(p).stat().st_mtime,
+        reverse=True,
+    ):
+        sig_path = _Path(sig)
+        # Skip empty sig files (0 significant DEGs)
+        try:
+            lines = sig_path.read_text().strip().splitlines()
+            if len(lines) <= 1:  # header only
+                continue
+        except OSError:
+            continue
+        run_dir = sig_path.parent.parent
+        best["deg_sig"] = str(sig_path)
+        full = sig_path.parent / "deseq2_full.tsv"
+        best["deg_full"] = str(full) if full.exists() else None
+        inf = run_dir / "inference.json"
+        if not inf.exists():
+            # Check enrichment sibling dir
+            for inf_candidate in sorted(
+                run_dir.parent.glob("*enrichment*/inference.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            ):
+                inf = inf_candidate
+                break
+        best["inference"] = str(inf) if inf.exists() else None
+        best["run_dir"] = str(run_dir)
+        break
+    return best
+
+
 if __name__ == "__main__":
     import argparse
     from pathlib import Path
@@ -75,18 +115,34 @@ if __name__ == "__main__":
     from scripts.rag.pipeline_context import assemble_pipeline_results
 
     p = argparse.ArgumentParser(description="Standalone RAG Q&A chat")
-    p.add_argument("--deg-full", default="runs/demo_bulk_v2/06_deg/deseq2_full.tsv")
-    p.add_argument(
-        "--deg-sig", default="runs/demo_bulk_v2/06_deg/deseq2_significant.tsv"
-    )
+    p.add_argument("--deg-full", default=None)
+    p.add_argument("--deg-sig", default=None)
     p.add_argument("--inference", default=None)
     p.add_argument("--n-deg", type=int, default=None)
     args = p.parse_args()
 
-    # Load real pipeline results from the most recent demo run
+    # Auto-detect the most recent run with significant DEGs if no files given
+    if not args.deg_sig:
+        latest = _find_latest_deg_run(Path("runs"))
+        if latest:
+            args.deg_sig = latest.get("deg_sig")
+            args.deg_full = args.deg_full or latest.get("deg_full")
+            args.inference = args.inference or latest.get("inference")
+            print(f"[RAG] Auto-detected run: {latest.get('run_dir')}")
+        else:
+            print(
+                "[RAG] No runs with significant DEGs found in runs/."
+                " Proceeding without gene filter."
+            )
+
+    # Load real pipeline results
     pipeline_results = assemble_pipeline_results(
-        deg_full_path=args.deg_full if Path(args.deg_full).exists() else None,
-        deg_sig_path=args.deg_sig if Path(args.deg_sig).exists() else None,
+        deg_full_path=(
+            args.deg_full if args.deg_full and Path(args.deg_full).exists() else None
+        ),
+        deg_sig_path=(
+            args.deg_sig if args.deg_sig and Path(args.deg_sig).exists() else None
+        ),
         n_deg_significant=args.n_deg,
         inference_path=args.inference,
         n_samples_ok=None,
@@ -94,16 +150,30 @@ if __name__ == "__main__":
     )
 
     pipeline_ctx = {
-        "deg_sig_path": args.deg_sig if Path(args.deg_sig).exists() else None,
-        "n_deg_significant": args.n_deg,
+        "deg_sig_path": args.deg_sig,
+        "n_deg_significant": args.n_deg or pipeline_results.get("n_deg_significant"),
         "child_summary": "",
     }
 
     print("=== RAG Q&A (standalone) ===")
     if pipeline_results.get("n_genes_tested"):
         print(f"    Genes tested : {pipeline_results['n_genes_tested']}")
-    if pipeline_results.get("n_deg_significant") is not None:
-        print(f"    Sig DEGs     : {pipeline_results['n_deg_significant']}")
+    n_sig = pipeline_results.get("n_deg_significant")
+    if n_sig is not None:
+        print(f"    Sig DEGs     : {n_sig}")
+    entrez = pipeline_results.get("deg_entrez_ids") or []
+    if entrez:
+        symbols = [
+            g.get("symbol", g["gene_id"])
+            for g in (pipeline_results.get("deg_top") or [])
+        ]
+        print(
+            f"    DEG symbols  : {', '.join(symbols[:8])}"
+            + (" ..." if len(symbols) > 8 else "")
+        )
+        print(f"    Gene filter  : {len(entrez)} Entrez IDs" " → focused retrieval")
+    else:
+        print("    Gene filter  : none (retrieval uses full pathway corpus)")
     if pipeline_results.get("inference_n_predicted") is not None:
         print(f"    PPI predicted: {pipeline_results['inference_n_predicted']}")
     print("    Type a biology question, or press Enter to quit.\n")

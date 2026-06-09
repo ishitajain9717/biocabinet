@@ -66,32 +66,58 @@ class AnswerResult:
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = (
-    "You are a bioinformatics research assistant helping interpret an"
-    " RNA-seq experiment. You have two sources of information:\n"
-    "  1. A 'Pipeline run summary' with facts about the specific experiment"
-    " (samples, DEG counts, conditions, predicted interactions).\n"
-    "  2. Numbered pathway documents from Reactome/KEGG.\n\n"
+    "You are a bioinformatics research assistant interpreting an RNA-seq"
+    " experiment.\n\n"
+    "You have three sources of information — use ALL of them:\n"
+    "  1. The DEG list: specific genes that changed expression, with fold"
+    " changes and adjusted p-values. Use your own biological knowledge"
+    " about these genes to reason about affected pathways and mechanisms.\n"
+    "  2. Numbered pathway documents from Reactome/KEGG that were retrieved"
+    " as relevant evidence. Cite them with [N] markers.\n"
+    "  3. The pipeline run summary (conditions, sample counts, etc.).\n\n"
     "Rules:\n"
-    "- For questions about the experiment itself (conditions, sample counts,"
-    " DEG numbers, tools used), answer from the Pipeline run summary.\n"
-    "- For biology questions about mechanisms, pathways, or gene functions,"
-    " cite the pathway documents using [N] markers.\n"
-    "- If neither source has sufficient information, say so honestly.\n"
-    "- Be concise: 3-6 sentences maximum."
+    "- Lead with your biological reasoning about the named genes.\n"
+    "- Cite pathway documents [N] where they support your answer.\n"
+    "- For experiment-level questions (conditions, tools, counts) use the"
+    " pipeline summary.\n"
+    "- Be concise: 4-6 sentences. Do not hedge with 'without more"
+    " information' if gene symbols are provided — reason from them."
 )
 
 _DOC_TEMPLATE = "[{rank}] {source} — {pathway_name}\n{text_excerpt}"
 
 _USER_TEMPLATE = """\
-Context about this RNA-seq experiment:
+{deg_block}\
 {experiment_context}
 
-Relevant pathway documents:
+Pathway documents retrieved for these genes:
 {doc_block}
 
 Question: {question}
 
-Answer with inline citations [N]:"""
+Answer (use gene knowledge + cite documents with [N]):"""
+
+
+def _build_deg_block(pipeline_results: "dict | None") -> str:
+    """Build a leading gene list block the LLM can reason from directly."""
+    if not pipeline_results:
+        return ""
+    deg_top = pipeline_results.get("deg_top") or []
+    if not deg_top:
+        return ""
+    lines = [
+        f"Differentially expressed genes in this experiment"
+        f" ({pipeline_results.get('n_deg_significant', len(deg_top))}"
+        " significant, sorted by |log2FC|):"
+    ]
+    for g in sorted(deg_top, key=lambda x: abs(x["log2fc"]), reverse=True):
+        symbol = g.get("symbol") or g["gene_id"]
+        arrow = "UP" if g["direction"] == "up" else "DOWN"
+        lines.append(
+            f"  {arrow:4s}  {symbol:10s}"
+            f"  log2FC={g['log2fc']:+.2f}  padj={g['padj']:.1e}"
+        )
+    return "\n".join(lines) + "\n\n"
 
 
 def _build_user_prompt(
@@ -102,7 +128,10 @@ def _build_user_prompt(
     pipeline_results: dict | None = None,
     max_chars_per_doc: int = 300,
 ) -> str:
-    # experiment context block — prefer rich pipeline_results over plain counts
+    # Leading DEG block — lets the LLM reason from gene names directly
+    deg_block = _build_deg_block(pipeline_results)
+
+    # Experiment context (conditions, sample counts, inference summary)
     if pipeline_results:
         from scripts.rag.pipeline_context import format_pipeline_results_for_prompt
 
@@ -130,6 +159,7 @@ def _build_user_prompt(
     doc_block = "\n\n".join(doc_lines)
 
     return _USER_TEMPLATE.format(
+        deg_block=deg_block,
         experiment_context=experiment_context,
         doc_block=doc_block,
         question=question,
@@ -283,20 +313,75 @@ def answer(
             error=f"Retrieval failed: {exc}",
         )
 
-    if not docs:
-        return AnswerResult(
-            question=question,
-            answer="No relevant pathway documents were found for your query.",
-            docs=[],
-            ok=True,
+    # Check doc relevance using a relative gap: if the top doc is barely
+    # better than the median, retrieval is random-noise (BioBERT embeddings
+    # cluster at 0.82-0.85 for ALL queries, so absolute thresholds don't work).
+    scores = [d.get("score", 0.0) for d in docs]
+    top_score = scores[0] if scores else 0.0
+    if len(scores) >= 4:
+        import statistics
+
+        median_score = statistics.median(scores)
+        low_relevance = not docs or (top_score - median_score) < 0.005
+    else:
+        low_relevance = not docs
+
+    llm = _make_llm()
+    import os
+
+    model_name = os.environ.get("OLLAMA_MODEL") or os.environ.get("OPENAI_MODEL", "LLM")
+
+    # 2a. Low / no relevance → skip docs, invoke LLM directly from gene list
+    if low_relevance:
+        if docs:
+            print(
+                f"  [RAG] Pathway similarity too low ({top_score:.2f})"
+                " — asking LLM directly from gene list.",
+                flush=True,
+            )
+        if llm is None:
+            no_llm_msg = (
+                "No relevant pathway documents found and no LLM configured.\n"
+                "Set OLLAMA_MODEL or OPENAI_API_KEY for a direct answer."
+            )
+            return AnswerResult(
+                question=question,
+                answer=no_llm_msg,
+                docs=docs,
+                ok=True,
+            )
+        deg_block = _build_deg_block(pipeline_results)
+        direct_prompt = (
+            f"{deg_block}"
+            f"Question: {question}\n\n"
+            "Answer using your biological knowledge about these genes:"
         )
+        print(f"Thinking with {model_name}...", flush=True)
+        try:
+            from langchain_core.messages import HumanMessage, SystemMessage
 
-    # Warn when all retrieved docs have low similarity — the question likely
-    # does not match any pathway and the answer will be unreliable.
-    top_score = docs[0].get("score", 1.0) if docs else 1.0
-    low_relevance = top_score < 0.60
+            resp = llm.invoke(
+                [
+                    SystemMessage(content=_SYSTEM_PROMPT),
+                    HumanMessage(content=direct_prompt),
+                ]
+            )
+            return AnswerResult(
+                question=question,
+                answer=resp.content,
+                citations=[],
+                docs=[],
+                ok=True,
+            )
+        except Exception as exc:
+            return AnswerResult(
+                question=question,
+                answer=f"(LLM error: {exc})",
+                ok=False,
+                error=str(exc),
+            )
 
-    # 2. Build prompt
+    # 2b. Good relevance → normal RAG path with pathway docs as context
     user_prompt = _build_user_prompt(
         question=question,
         docs=docs,
@@ -305,25 +390,12 @@ def answer(
         pipeline_results=pipeline_results,
     )
 
-    # 3. LLM call (with fallback)
-    if low_relevance:
-        print(
-            f"  [RAG] Note: top pathway similarity={top_score:.2f} — "
-            "this question may not be about biological pathways.",
-            flush=True,
-        )
-
-    llm = _make_llm()
+    # 3. LLM call with pathway context
     if llm is None:
         answer_text = _fallback_answer(question, docs)
     else:
-        import os
-
-        model_name = os.environ.get("OLLAMA_MODEL") or os.environ.get(
-            "OPENAI_MODEL", "LLM"
-        )
         print(
-            f"Thinking with {model_name} (may take up to 30 s on first call)...",
+            f"Thinking with {model_name}" " (may take up to 30 s on first call)...",
             flush=True,
         )
         try:
@@ -337,7 +409,6 @@ def answer(
             )
             answer_text = resp.content
         except Exception as exc:
-            # LLM failed — degrade gracefully
             answer_text = _fallback_answer(question, docs)
             answer_text += f"\n\n(LLM error: {exc})"
 

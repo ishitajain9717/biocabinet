@@ -41,14 +41,54 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 
+def _ensg_to_gene_info(ensg_ids: list[str]) -> dict[str, dict]:
+    """Map ENSG IDs to {entrez_id, symbol} via mygene (single batched call).
+
+    Returns {ensg_id: {"entrez": "7157", "symbol": "TP53"}}.
+    Missing mappings are silently omitted; network/import failures return {}.
+    """
+    if not ensg_ids:
+        return {}
+    try:
+        import mygene
+
+        mg = mygene.MyGeneInfo()
+        hits = mg.querymany(
+            ensg_ids,
+            scopes="ensembl.gene",
+            fields="entrezgene,symbol",
+            species="human",
+            verbose=False,
+        )
+        mapping: dict[str, dict] = {}
+        for h in hits:
+            if h.get("notfound"):
+                continue
+            entrez = h.get("entrezgene")
+            symbol = h.get("symbol")
+            if entrez:
+                mapping[h["query"]] = {
+                    "entrez": str(int(entrez)),
+                    "symbol": symbol or h["query"],
+                }
+        return mapping
+    except Exception:
+        return {}
+
+
 def _read_deg(
     deg_full_path: str | Path | None, deg_sig_path: str | Path | None
 ) -> dict[str, Any]:
-    """Read DESeq2 result TSVs into structured dicts."""
+    """Read DESeq2 result TSVs into structured dicts.
+
+    Also translates ENSG IDs to Entrez IDs (used as gene_filter keys in the
+    RAG index, which is keyed by Entrez ID).
+    """
     result: dict[str, Any] = {
         "n_genes_tested": None,
         "n_deg_significant": None,
         "deg_top": [],
+        "deg_entrez_ids": [],  # Entrez IDs for RAG gene_filter
     }
 
     # Count total genes tested from the full table
@@ -70,13 +110,16 @@ def _read_deg(
             result["n_deg_significant"] = len(rows)
 
             top: list[dict] = []
+            ensg_ids: list[str] = []
             for r in rows[:20]:
                 try:
                     lfc = float(r.get("log2FoldChange") or 0)
                     padj = float(r.get("padj") or 1)
+                    gid = r.get("gene_id", r.get("", ""))
+                    ensg_ids.append(gid)
                     top.append(
                         {
-                            "gene_id": r.get("gene_id", r.get("", "")),
+                            "gene_id": gid,
                             "log2fc": round(lfc, 4),
                             "padj": round(padj, 6),
                             "direction": "up" if lfc >= 0 else "down",
@@ -85,6 +128,26 @@ def _read_deg(
                 except (ValueError, KeyError):
                     continue
             result["deg_top"] = top
+
+            # Translate ENSG → Entrez + symbol for RAG gene filter and prompt
+            print(
+                f"[pipeline_context] looking up symbols for"
+                f" {len(ensg_ids)} DEGs via mygene...",
+                flush=True,
+            )
+            gene_info = _ensg_to_gene_info(ensg_ids)
+            result["deg_entrez_ids"] = [v["entrez"] for v in gene_info.values()]
+            # Annotate each DEG entry with Entrez ID and symbol
+            for entry in top:
+                info = gene_info.get(entry["gene_id"], {})
+                entry["entrez_id"] = info.get("entrez")
+                entry["symbol"] = info.get("symbol", entry["gene_id"])
+            print(
+                f"[pipeline_context] resolved"
+                f" {len(result['deg_entrez_ids'])}/{len(ensg_ids)} genes"
+                " (Entrez + symbol)",
+                flush=True,
+            )
         except Exception:
             pass
 
@@ -202,8 +265,12 @@ def format_pipeline_results_for_prompt(pr: dict[str, Any]) -> str:
         lines.append("\nTop differentially expressed genes:")
         for g in deg_top[:10]:
             arrow = "▲" if g["direction"] == "up" else "▼"
+            # Show symbol if available, fall back to ENSG ID
+            label = g.get("symbol") or g["gene_id"]
+            if label != g["gene_id"]:
+                label = f"{label} ({g['gene_id']})"
             lines.append(
-                f"  {arrow} {g['gene_id']}"
+                f"  {arrow} {label}"
                 f"  log2FC={g['log2fc']:+.2f}  padj={g['padj']:.2e}"
             )
 

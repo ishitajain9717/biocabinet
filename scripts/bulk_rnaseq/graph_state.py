@@ -3,6 +3,7 @@
 LangGraph requires state to be a TypedDict so it knows the exact shape
 of the object it is checkpointing to SQLite after each node finishes.
 """
+
 from __future__ import annotations
 
 # Annotated lets us attach metadata to a type hint without changing the type.
@@ -48,9 +49,9 @@ class PipelineState(TypedDict):
     # skipped (cfg.enable_deg=False) or failed. The orchestrator's enrichment
     # auto-chain reads `deg_pairs_path` and uses it as the candidate-pair
     # input for inference.
-    deg_full_path:    str | None
-    deg_sig_path:     str | None
-    deg_pairs_path:   str | None
+    deg_full_path: str | None
+    deg_sig_path: str | None
+    deg_pairs_path: str | None
     n_deg_significant: int | None
 
     # ----- LLM conversation memory -----
@@ -61,7 +62,10 @@ class PipelineState(TypedDict):
     # as the graph runs node → node.
     messages: Annotated[list, add_messages]
 
-    # ----- error channel -----
+    # ----- QC gate decisions -----
+    # Populated by the FastQC gate (LLM decision per sample).
+    # Dict: {sample_name: {"decision": "PASS"|"WARN"|"FAIL", "reason": str}}
+    qc_decisions: dict[str, dict]
     # Any node can write a string here to signal a hard, unrecoverable failure
     # (e.g. GTF file missing, genome index corrupt).
     # The graph router checks this field and short-circuits to an error node
