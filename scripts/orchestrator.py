@@ -56,6 +56,7 @@ class OrchestratorState(TypedDict):
     bulk_n_deg: int | None  # number of significant DEGs
     bulk_n_samples_ok: int | None  # samples that finished featurecounts
     bulk_conditions: dict | None  # {"treated": ..., "reference": ...}
+    bulk_run_dir: str | None  # out_dir of the bulk run (for artifact scan)
     enrichment_summary: str
     enrichment_error: str | None
     enrichment_ran: bool
@@ -68,8 +69,8 @@ class OrchestratorState(TypedDict):
 # ---------- entry: pick a modality ----------
 
 
-def _ask_data_type() -> str:
-    print("=== RNA-seq agentic pipeline ===")
+def _ask_data_type_manual() -> str:
+    """Fall back to the manual menu when auto-detection is declined."""
     print("What kind of data are you starting from?")
     print("  bulk_rnaseq  : paired/single FASTQ files")
     print("  scrna        : single-cell .h5ad / 10x output / pbmc3k")
@@ -80,6 +81,54 @@ def _ask_data_type() -> str:
     if raw not in _VALID:
         raise ValueError(f"Invalid choice: {raw}. Pick one of {_VALID}.")
     return raw
+
+
+def _ask_data_type() -> str:
+    """Detect the modality from an input path, then confirm with the user.
+
+    The user may give a path to auto-detect, or press Enter to skip straight
+    to the manual menu.
+    """
+    print("=== RNA-seq agentic pipeline ===")
+    raw = (
+        input(
+            "Path to your input data (file or folder)"
+            " — or press Enter to choose manually: "
+        )
+        .strip()
+        .strip('"')
+        .strip("'")
+    )
+
+    if not raw:
+        return _ask_data_type_manual()
+
+    from scripts.common.data_detect import detect_data_type
+
+    result = detect_data_type(raw)
+
+    if result.data_type == "unknown":
+        print(
+            "\nCould not auto-detect the data type" f" ({'; '.join(result.evidence)})."
+        )
+        return _ask_data_type_manual()
+
+    print("\n--- Auto-detection ---")
+    print(f"  Detected type : {result.data_type}")
+    if result.platform:
+        print(f"  Platform      : {result.platform}")
+    print(f"  Confidence    : {result.confidence}")
+    print("  Evidence      :")
+    for ev in result.evidence:
+        print(f"    • {ev}")
+    print(f"  Scores        : {result.scores}")
+
+    ans = (
+        input(f"\nUse '{result.data_type}'? [Y/n to choose manually]: ").strip().lower()
+    )
+    if ans in ("", "y", "yes"):
+        return result.data_type
+    return _ask_data_type_manual()
 
 
 def graph_node_ask_data_type(state: OrchestratorState) -> dict:
@@ -93,6 +142,7 @@ def graph_node_ask_data_type(state: OrchestratorState) -> dict:
         "bulk_n_deg": None,
         "bulk_n_samples_ok": None,
         "bulk_conditions": None,
+        "bulk_run_dir": None,
         "enrichment_summary": "",
         "enrichment_error": None,
         "enrichment_ran": False,
@@ -262,6 +312,7 @@ def build_graph(memory, parent_thread_id: str) -> StateGraph:
             "bulk_n_deg": cs.get("n_deg_significant"),
             "bulk_n_samples_ok": n_samples_ok,
             "bulk_conditions": conditions,
+            "bulk_run_dir": str(cs.get("config", {}).get("out_dir") or ""),
         }
 
     def graph_node_run_scrna(state: OrchestratorState) -> dict:
@@ -369,7 +420,14 @@ def build_graph(memory, parent_thread_id: str) -> StateGraph:
             "child_summary": state.get("child_summary") or "",
         }
 
+        from scripts.rag.artifact_reader import scan_run_dir
         from scripts.rag.graph import build_rag_chat_graph
+
+        # Scan the bulk run directory for all artifacts
+        bulk_run_dir = state.get("bulk_run_dir") or ""
+        run_artifacts: dict = {}
+        if bulk_run_dir and Path(bulk_run_dir).exists():
+            run_artifacts = scan_run_dir(bulk_run_dir)
 
         _run_child(
             build_rag_chat_graph,
@@ -379,6 +437,9 @@ def build_graph(memory, parent_thread_id: str) -> StateGraph:
             initial_state={
                 "pipeline_context": pipeline_ctx,
                 "pipeline_results": pipeline_results,
+                "run_artifacts": run_artifacts,
+                "experiment_summary": "",
+                "data_type_confirmed": False,
                 "should_quit": False,
             },
         )

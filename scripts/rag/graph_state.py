@@ -33,5 +33,8 @@ from langgraph.graph.message import add_messages
 class RagChatState(TypedDict):
     pipeline_context: dict  # lightweight context (paths, counts, summary text)
     pipeline_results: dict  # rich structured pipeline output for the LLM prompt
+    run_artifacts: dict  # full artifact scan (STAR, QC, featureCounts, GNN)
+    experiment_summary: str  # LLM-generated experiment characterisation
+    data_type_confirmed: bool  # True after startup inference node has run
     messages: Annotated[list, add_messages]
     should_quit: bool

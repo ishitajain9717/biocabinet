@@ -271,6 +271,88 @@ def node_trim(
     )
 
 
+def _parse_star_log(log_path: Path) -> dict:
+    """Parse STAR's Log.final.out into a flat metrics dict.
+
+    STAR writes lines in the form:
+        "   <label> |\\t<value>"
+    We strip both sides and convert numeric values to int/float where possible.
+
+    Key fields returned (None when not found):
+        n_input_reads          int   — total reads fed to STAR
+        n_uniquely_mapped      int   — reads aligned exactly once
+        pct_uniquely_mapped    float — % uniquely mapped
+        pct_multi_mapped       float — % mapped to multiple loci
+        pct_unmapped_tooshort  float — % too short to map (common quality signal)
+        pct_unmapped_mismatch  float — % unmapped: too many mismatches
+        pct_unmapped_other     float — % unmapped: other
+        n_splices_total        int
+        mismatch_rate_pct      float
+        deletion_rate_pct      float
+        insertion_rate_pct     float
+    """
+    metrics: dict = {
+        "n_input_reads": None,
+        "n_uniquely_mapped": None,
+        "pct_uniquely_mapped": None,
+        "pct_multi_mapped": None,
+        "pct_unmapped_tooshort": None,
+        "pct_unmapped_mismatch": None,
+        "pct_unmapped_other": None,
+        "n_splices_total": None,
+        "mismatch_rate_pct": None,
+        "deletion_rate_pct": None,
+        "insertion_rate_pct": None,
+        "star_log_path": str(log_path),
+    }
+
+    if not log_path.exists():
+        return metrics
+
+    # Map STAR label substrings → our metric keys + whether to strip "%" from value
+    _FIELD_MAP = [
+        ("Number of input reads", "n_input_reads", False),
+        ("Uniquely mapped reads number", "n_uniquely_mapped", False),
+        ("Uniquely mapped reads %", "pct_uniquely_mapped", True),
+        ("% of reads mapped to multiple loci", "pct_multi_mapped", True),
+        ("% of reads unmapped: too short", "pct_unmapped_tooshort", True),
+        ("% of reads unmapped: too many mismatches", "pct_unmapped_mismatch", True),
+        ("% of reads unmapped: other", "pct_unmapped_other", True),
+        ("Number of splices: Total", "n_splices_total", False),
+        ("Mismatch rate per base, %", "mismatch_rate_pct", True),
+        ("Deletion rate per base", "deletion_rate_pct", True),
+        ("Insertion rate per base", "insertion_rate_pct", True),
+    ]
+
+    try:
+        content = log_path.read_text(errors="replace")
+    except OSError:
+        return metrics
+
+    for line in content.splitlines():
+        if "|" not in line:
+            continue
+        label_raw, _, value_raw = line.partition("|")
+        label = label_raw.strip()
+        value = value_raw.strip().rstrip("%")
+        for star_label, key, _strip_pct in _FIELD_MAP:
+            if star_label in label:
+                try:
+                    parsed: int | float = (
+                        int(value) if "." not in value else float(value)
+                    )
+                    metrics[key] = parsed
+                except ValueError:
+                    pass
+                break
+
+    # Sanity-check: flag low mapping rate so the RAG / summary can highlight it
+    pct = metrics.get("pct_uniquely_mapped")
+    metrics["mapping_rate_ok"] = pct is not None and pct >= 70.0
+
+    return metrics
+
+
 def node_align(
     cfg: PreprocessingConfig, sample: Sample, r1: Path, r2: Optional[Path]
 ) -> NodeResult:
@@ -308,12 +390,15 @@ def node_align(
 
     _, err, rc = _run(cmd)
     bam_path = Path(str(prefix) + "Aligned.sortedByCoord.out.bam")
+    log_path = Path(str(prefix) + "Log.final.out")
+
     if rc != 0 or not bam_path.exists():
+        star_metrics = _parse_star_log(log_path)
         return NodeResult(
             name="align",
             ok=False,
             message=_tail(err) or "STAR did not produce expected BAM",
-            metrics={"returncode": rc},
+            metrics={"returncode": rc, **star_metrics},
         )
 
     _, err_idx, rc_idx = _run(["samtools", "index", str(bam_path)])
@@ -322,17 +407,24 @@ def node_align(
             name="align",
             ok=False,
             message=f"samtools index failed: {_tail(err_idx)}",
-            outputs={"bam": str(bam_path)},
+            outputs={"bam": str(bam_path), "star_log": str(log_path)},
             metrics={"returncode": rc_idx},
         )
 
     _, err_qc, rc_qc = _run(["samtools", "quickcheck", str(bam_path)])
+
+    star_metrics = _parse_star_log(log_path)
+    pct = star_metrics.get("pct_uniquely_mapped")
+    mapping_note = f" ({pct:.1f}% uniquely mapped)" if pct is not None else ""
+
     return NodeResult(
         name="align",
         ok=(rc_qc == 0),
-        message="ok" if rc_qc == 0 else f"quickcheck failed: {_tail(err_qc)}",
-        outputs={"bam": str(bam_path)},
-        metrics={"returncode": rc_qc},
+        message=(
+            f"ok{mapping_note}" if rc_qc == 0 else f"quickcheck failed: {_tail(err_qc)}"
+        ),
+        outputs={"bam": str(bam_path), "star_log": str(log_path)},
+        metrics={"returncode": rc_qc, **star_metrics},
     )
 
 

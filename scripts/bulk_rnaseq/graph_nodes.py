@@ -264,6 +264,12 @@ def _llm_trim_gate(
         return steps, "; ".join(reasons)
 
     return [], f"adapter={pct_ada}% (<2%) and all quality modules pass"
+
+
+# ---------- node 1: collect config + seed state ----------
+
+
+def graph_node_collect_config(state: PipelineState) -> dict:
     """Prompt the user for paths/options and seed the state.
 
     Returns initial empty values for every field the rest of the graph
@@ -427,17 +433,46 @@ def _deterministic_summary(state: PipelineState) -> str:
         f"  Normalizations  : {norms if norms else 'none'}",
     ]
 
+    # Per-sample alignment stats from node_history (align nodes)
+    align_stats: dict[str, dict] = {}
+    for r in history:
+        if r.name == "align" and r.metrics:
+            # Try to recover sample name from output bam path
+            bam = r.outputs.get("bam", "")
+            # bam path is <out_dir>/03_bam/<sample>/<sample>_Aligned...
+            parts = Path(bam).parts if bam else []
+            sname_guess = parts[-2] if len(parts) >= 2 else "unknown"
+            align_stats[sname_guess] = r.metrics
+
+    if align_stats:
+        lines.append("\nAlignment stats (STAR):")
+        for sname, m in align_stats.items():
+            pct_map = m.get("pct_uniquely_mapped")
+            pct_multi = m.get("pct_multi_mapped")
+            pct_short = m.get("pct_unmapped_tooshort")
+            n_input = m.get("n_input_reads")
+            mismatch = m.get("mismatch_rate_pct")
+            flag = " [LOW MAPPING]" if m.get("mapping_rate_ok") is False else ""
+            stat_parts = []
+            if n_input:
+                stat_parts.append(f"input={n_input:,}")
+            stat_parts.append(f"unique={pct_map}%{flag}")
+            if pct_multi is not None:
+                stat_parts.append(f"multi={pct_multi}%")
+            if pct_short is not None:
+                stat_parts.append(f"too_short={pct_short}%")
+            if mismatch is not None:
+                stat_parts.append(f"mismatch={mismatch}%")
+            lines.append(f"  {sname:20s}  " + "  ".join(stat_parts))
+
     if qc_decisions:
-        lines.append("\nQC gate decisions (LLM):")
+        lines.append("\nQC + trim gate decisions (LLM):")
         for sname, dec in qc_decisions.items():
             verdict = dec.get("decision", "?")
             reason = dec.get("reason", "")
             steps = dec.get("trim_steps", [])
             trim_reason = dec.get("trim_reason", "")
-            if steps:
-                steps_str = " ".join(steps)
-            else:
-                steps_str = "SKIP-TRIM"
+            steps_str = " ".join(steps) if steps else "SKIP-TRIM"
             lines.append(f"  {sname:20s}  [QC:{verdict}]  {reason}")
             lines.append(f"  {'':20s}  [TRIM: {steps_str}]")
             if trim_reason:

@@ -227,13 +227,113 @@ _DATABASE_KEYWORDS = (
 )
 
 
-def _answer_from_metadata(question: str, ctx: dict, pr: dict | None) -> str | None:
-    """Answer run-level questions (DEG counts, pipeline steps, databases) from context.
+_ALIGNMENT_KEYWORDS = (
+    "alignment",
+    "mapping rate",
+    "mapped reads",
+    "how many reads",
+    "star",
+    "uniquely mapped",
+    "multimapped",
+    "unmapped",
+)
+
+_QC_ARTIFACT_KEYWORDS = (
+    "fastqc",
+    "quality score",
+    "adapter",
+    "duplication",
+    "qc report",
+    "trimming",
+    "which samples failed",
+    "samples dropped",
+    "qc gate",
+)
+
+_GNN_KEYWORDS = (
+    "gnn",
+    "model performance",
+    "f1 score",
+    "precision",
+    "recall",
+    "ppi model",
+    "interaction model",
+    "protein interaction model",
+)
+
+
+def _answer_from_metadata(
+    question: str,
+    ctx: dict,
+    pr: dict | None,
+    arts: dict | None = None,
+    exp_summary: str = "",
+) -> str | None:
+    """Answer run-level questions (DEG counts, pipeline steps, databases,
+    alignment stats, QC) from context and artifact scan.
 
     Returns a plain-text answer, or None to fall through to pathway RAG.
     """
     q = question.lower()
     pr = pr or {}
+    arts = arts or {}
+
+    # --- alignment / mapping stats ---
+    if any(kw in q for kw in _ALIGNMENT_KEYWORDS):
+        samples = arts.get("samples") or {}
+        if samples:
+            lines = ["Alignment statistics (STAR):"]
+            for sname, s in samples.items():
+                star = s.get("star") or {}
+                pct = star.get("pct_uniquely_mapped")
+                n = star.get("n_uniquely_mapped")
+                n_in = star.get("n_input_reads")
+                multi = star.get("pct_multimapped")
+                if pct is not None:
+                    lines.append(
+                        f"  {sname}: {pct}% uniquely mapped"
+                        + (f"  ({n:,} / {n_in:,} reads)" if n and n_in else "")
+                        + (f"  multi={multi}%" if multi else "")
+                    )
+                else:
+                    lines.append(f"  {sname}: alignment stats not available")
+            return "\n".join(lines)
+        return "Alignment statistics are not available for this run."
+
+    # --- FastQC / QC gate artifact questions ---
+    if any(kw in q for kw in _QC_ARTIFACT_KEYWORDS):
+        samples = arts.get("samples") or {}
+        failed = arts.get("failed_samples") or []
+        lines = []
+        if failed:
+            lines.append(f"Samples dropped by QC gate: {', '.join(failed)}")
+        if samples:
+            lines.append("Per-sample QC summary:")
+            for sname, s in samples.items():
+                fqc = s.get("fastqc") or {}
+                mods = fqc.get("modules") or {}
+                ada = mods.get("Adapter Content", "?")
+                qual = mods.get("Per base sequence quality", "?")
+                dup = fqc.get("pct_duplicates")
+                lines.append(
+                    f"  {sname}: quality={qual}  adapter={ada}"
+                    + (f"  duplicates={dup}%" if dup else "")
+                )
+        if not lines:
+            return "FastQC results are not available for this run."
+        return "\n".join(lines)
+
+    # --- GNN model performance ---
+    if any(kw in q for kw in _GNN_KEYWORDS):
+        if arts.get("gnn_f1") is not None:
+            return (
+                f"GNN PPI model performance on the test set:\n"
+                f"  F1        = {arts['gnn_f1']:.3f}\n"
+                f"  Precision = {arts.get('gnn_precision', '?'):.3f}\n"
+                f"  Recall    = {arts.get('gnn_recall', '?'):.3f}\n"
+                f"  Test size = {arts.get('gnn_n_test', '?')} pairs"
+            )
+        return "GNN model metrics are not available for this run."
 
     # --- experimental conditions questions ---
     if any(kw in q for kw in _CONDITIONS_KEYWORDS):
@@ -338,8 +438,118 @@ def _answer_from_metadata(question: str, ctx: dict, pr: dict | None) -> str | No
     )
 
 
+# ---------------------------------------------------------------------------
+# node 0 — startup: LLM infers experiment type, confirms with user
+# ---------------------------------------------------------------------------
+
+_INFER_SYSTEM_PROMPT = (
+    "You are a bioinformatics assistant. You have been given a report of all "
+    "artifacts produced by an RNA-seq pipeline run. Based on this data, "
+    "characterise the experiment in 4–6 bullet points covering:\n"
+    "  • Experiment type (bulk RNA-seq, paired-end / single-end)\n"
+    "  • Comparison (treated vs control, conditions)\n"
+    "  • Data quality (alignment rate, adapter contamination, DEG count)\n"
+    "  • Downstream results (PPI model performance if available)\n"
+    "  • Any notable issues (failed samples, low mapping, etc.)\n\n"
+    "Be concise and factual. Only state what the data shows. "
+    "Do not speculate beyond the numbers."
+)
+
+
+def graph_node_infer_data_type(state: RagChatState) -> dict:
+    """Run once at startup: LLM reads all artifacts, characterises the
+    experiment, and asks the user to confirm before Q&A begins.
+
+    Skipped if state['data_type_confirmed'] is already True (already ran).
+    """
+    if state.get("data_type_confirmed"):
+        return {}
+
+    arts = state.get("run_artifacts") or {}
+    pr = state.get("pipeline_results") or {}
+
+    # Build the data block the LLM will read
+    try:
+        from scripts.rag.artifact_reader import format_artifacts_for_prompt
+
+        artifact_block = format_artifacts_for_prompt(arts)
+    except Exception:
+        artifact_block = "(artifact scan not available)"
+
+    try:
+        from scripts.rag.pipeline_context import format_pipeline_results_for_prompt
+
+        results_block = format_pipeline_results_for_prompt(pr)
+    except Exception:
+        results_block = ""
+
+    data_block = f"{artifact_block}\n\n{results_block}".strip()
+
+    print("\n" + "═" * 60)
+    print("  RAG startup — reading pipeline artifacts...")
+    print("═" * 60)
+
+    experiment_summary = ""
+
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        from scripts.rag.answerer import _make_llm
+
+        llm = _make_llm()
+        if llm is not None:
+            print("  Asking LLM to characterise the experiment...", flush=True)
+            resp = llm.invoke(
+                [
+                    SystemMessage(content=_INFER_SYSTEM_PROMPT),
+                    HumanMessage(content=data_block),
+                ]
+            )
+            experiment_summary = resp.content.strip()
+        else:
+            # Deterministic fallback summary
+            lines = ["Experiment characterisation (automatic):"]
+            conds = pr.get("conditions") or {}
+            if conds:
+                lines.append(
+                    f"  • Comparison : {conds.get('treated','?')} vs "
+                    f"{conds.get('reference','?')}"
+                )
+            n_ok = pr.get("n_samples_ok") or arts.get("config", {})
+            if isinstance(n_ok, int):
+                lines.append(f"  • Samples completed: {n_ok}")
+            if pr.get("n_deg_significant") is not None:
+                lines.append(f"  • Significant DEGs : {pr['n_deg_significant']}")
+            if arts.get("gnn_f1") is not None:
+                lines.append(f"  • GNN PPI model F1 : {arts['gnn_f1']:.3f}")
+            experiment_summary = "\n".join(lines)
+    except Exception as exc:
+        experiment_summary = f"(could not infer experiment type: {exc})"
+
+    print(f"\n{experiment_summary}\n")
+    print("─" * 60)
+    raw = input("Does this match your experiment? [Y/n/edit]: ").strip().lower()
+
+    if raw.startswith("e"):
+        correction = input("Describe the correction: ").strip()
+        if correction:
+            experiment_summary += f"\n\n[User correction: {correction}]"
+        confirmed = True
+    elif raw in ("n", "no"):
+        correction = input("Please briefly describe the experiment: ").strip()
+        experiment_summary = correction or experiment_summary
+        confirmed = True
+    else:
+        confirmed = True
+
+    print()  # blank line before Q&A prompt
+    return {
+        "experiment_summary": experiment_summary,
+        "data_type_confirmed": confirmed,
+    }
+
+
 def graph_node_collect_query(state: RagChatState) -> dict:
-    """Ask the user for a biology question.  Empty input → exit."""
     print("\n" + "─" * 60)
     print("RAG Q&A  (type a biology question, or press Enter to exit)")
     print("─" * 60)
@@ -396,9 +606,11 @@ def graph_node_rag_answer(state: RagChatState) -> dict:
 
     ctx = state.get("pipeline_context") or {}
     pr = state.get("pipeline_results") or {}
+    arts = state.get("run_artifacts") or {}
+    exp_summary = state.get("experiment_summary") or ""
 
     # Route 1: pipeline metadata (DEG counts, conditions, tools used)
-    meta_answer = _answer_from_metadata(question, ctx, pr)
+    meta_answer = _answer_from_metadata(question, ctx, pr, arts, exp_summary)
     if meta_answer is not None:
         print(f"\nAnswer:\n{meta_answer}\n")
         return {"messages": [AIMessage(content=meta_answer)]}

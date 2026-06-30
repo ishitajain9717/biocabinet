@@ -30,6 +30,11 @@ scanpy>=1.10
 # leidenalg>=0.10
 # python-igraph>=0.11
 
+# Spatial (imaging / Vizgen) — squidpy reads MERSCOPE cell tables,
+# harmonypy corrects FOV batch effects in the bias-check loop
+squidpy>=1.6
+harmonypy>=0.0.10
+
 # Pathway APIs (enrichment build scripts)
 requests>=2.31
 tenacity>=8.2

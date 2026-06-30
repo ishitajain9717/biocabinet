@@ -1,7 +1,9 @@
 # Transcriptomic-agent
 
-An agentic RNA-seq analysis pipeline built on [LangGraph](https://github.com/langchain-ai/langgraph).
+An agentic transcriptomics analysis platform built on [LangGraph](https://github.com/langchain-ai/langgraph).
 It orchestrates FastQC → trimming → alignment → quantification → normalisation → differential expression → GNN-based PPI enrichment, with an optional RAG layer that grounds LLM summaries in KEGG and Reactome pathway knowledge.
+
+The pipeline is **agentic at the decision points, not just the prose**: an LLM (with deterministic guardrails) decides whether a sample passes FastQC, what Trimmomatic steps to apply, what experiment type an input directory contains, and — in the spatial pipeline — whether suspicious clusters are a real cell type or an imaging batch effect. Every LLM decision is validated against hard metrics and falls back to rule-based logic if the model is unavailable or unreliable.
 
 ---
 
@@ -21,6 +23,12 @@ Orchestrator (LangGraph)
 │   ├── QC  →  Filter  →  Normalise  →  PCA
 │   ├── Cluster  (Leiden / UMAP)
 │   └── Marker genes  →  Summarise  ← RAG-augmented
+│
+├── Spatial (imaging) sub-pipeline  (in development — Vizgen/MERSCOPE)
+│   ├── Load  (squidpy Vizgen cell tables)
+│   ├── QC  (blank-FDR, per-cell counts/volume, FOV outliers)
+│   ├── Cluster  (PCA → Leiden)
+│   └── FOV-bias check  ← agentic (metrics + LLM + Harmony correct/re-cluster loop)
 │
 ├── Enrichment sub-pipeline  (auto-chained after bulk)
 │   ├── Load PPI graph  (STRING / SHS27k)
@@ -59,7 +67,10 @@ Installed via `pip install -e ".[llm]"` from `pyproject.toml`. These are **impor
 | `langgraph`, `langchain-core` | Orchestrator, all graphs | Agent workflow + state |
 | `pandas`, `numpy`, `scipy` | Bulk, scRNA, enrichment | Tables and numerics |
 | `pydeseq2` | Bulk | Differential expression (DESeq2) |
-| `scanpy` | scRNA | Load h5ad/10x, QC, normalize, PCA, cluster, markers |
+| `scanpy` | scRNA, Spatial | Load h5ad/10x, QC, normalize, PCA, cluster, markers |
+| `squidpy` | Spatial | Read MERSCOPE/Vizgen cell tables into AnnData |
+| `harmonypy` | Spatial | FOV batch correction in the bias-check loop |
+| `python-dotenv` | All | Auto-load LLM config from `.env` |
 | `torch`, `torch-geometric` | Enrichment | GNN training and inference |
 | `transformers` | Enrichment, RAG | BioBERT pathway text embeddings |
 | `fair-esm` | Enrichment | ESM-2 protein sequence embeddings |
@@ -79,14 +90,16 @@ pip install leidenalg python-igraph
 
 ### Bulk RNA-seq
 
-**Workflow:** FASTQ → FastQC → Trimmomatic (optional) → STAR → featureCounts → TPM/FPKM/RPKM → PyDESeq2 → summarise (+ RAG).
+**Workflow:** FASTQ → FastQC → **agentic QC gate** → **agentic trim gate** (LLM picks Trimmomatic steps from the FastQC report) → STAR → featureCounts → TPM/FPKM/RPKM → PyDESeq2 → summarise (+ RAG).
+
+The QC gate lets the agent **drop a failing sample and continue** with the rest of the batch rather than aborting the run; the trim gate generates sample-specific Trimmomatic arguments, validated against the FastQC metrics before execution.
 
 | Type | Requirement | Notes |
 |---|---|---|
 | **CLI on `PATH`** | [FastQC](https://www.bioinformatics.babraham.ac.uk/projects/fastqc/) | QC | `brew install fastqc` |
 | | [STAR](https://github.com/alexdobin/STAR) | Alignment | `brew install star` |
 | | [featureCounts](https://subread.sourceforge.net/) (Subread) | Gene counts | `brew install subread` |
-| | [Trimmomatic](http://www.usadellab.org/cms/?page=trimmomatic) | Adapter trim | JAR + `java`; or set `skip_trim=True` |
+| | [Trimmomatic](http://www.usadellab.org/cms/?page=trimmomatic) | Adapter/quality trim | JAR + `java`; steps chosen by the agentic trim gate |
 | | `java` | Runs Trimmomatic | Required only if trimming is enabled |
 | **Python (`pip`)** | `pydeseq2`, `pandas`, `mygene` | DEG + pair export for enrichment | In `pyproject.toml` |
 | **Reference data** | STAR genome index + GTF | Not in git | See [`data/README.md`](data/README.md) — GENCODE GRCh38 + `STAR --runMode genomeGenerate` |
@@ -110,11 +123,25 @@ pip install leidenalg python-igraph
 
 ---
 
-### Spatial transcriptomics
+### Spatial transcriptomics (imaging-based)
 
-**Status:** stub only (`scripts/spatial/graph.py` returns “not implemented”). No tools or data required yet.
+**Status:** in active development. The v1 scope targets **imaging-based** platforms — **MERSCOPE / Vizgen** — starting from the post-segmentation cell tables (segmentation is the user's responsibility). The node-level building blocks are implemented and tested; final assembly into the orchestrated LangGraph (`scripts/spatial/graph.py`) is still in progress, so the orchestrator currently routes spatial inputs to a stub.
 
-Planned stack (for reference): spatial `.h5ad` with coordinates, spatial-aware QC/normalization, neighborhood graphs — likely **Scanpy + spatial extensions** (e.g. Squidpy), still **no separate CLI tools** unless we add image registration later.
+**Planned workflow:** Load (squidpy Vizgen reader) → QC (blank-FDR, per-cell counts/genes/volume, FOV outliers) → normalize → cluster (PCA → Leiden) → **FOV-bias check** → annotation (CeLLama-style, reimplemented in Python) → summarise (+ RAG).
+
+| Type | Requirement | Notes |
+|---|---|---|
+| **CLI on `PATH`** | *(none)* | Entire pipeline is Python |
+| **Python (`pip`)** | `squidpy`, `scanpy`, `harmonypy` | Read tables, QC/cluster, batch correction | In `pyproject.toml` |
+| | `leidenalg`, `python-igraph` | Leiden clustering | Install if clustering errors |
+| **Input** | `*_cell_by_gene.csv` + `*_cell_metadata.csv` | MERSCOPE per-region exports | Auto-detected in the input dir |
+| **Optional** | LLM env vars | Agentic FOV-bias adjudication | Deterministic rule fallback without LLM |
+
+**The FOV-bias check** is the spatial pipeline's flagship agentic step. Imaging-based data is captured tile-by-tile (each tile = a *field of view*, FOV), and per-FOV imaging differences can split one real cell type into several clusters. The node:
+
+1. Computes deterministic evidence — **iLISI** (do expression-neighbors mix across FOVs?), **Cramér's V** (is cluster identity explained by FOV?), and the **fraction of cells in FOV-pure clusters**.
+2. Hands that evidence to an LLM, which returns `BATCH_EFFECT` / `BIOLOGY` / `UNCERTAIN` plus an action — with **guardrails** that override the model in both directions (never silently keep an obvious artifact, never over-correct clean biology) and a rule-based fallback.
+3. If a batch effect is confirmed, runs **Harmony** correction on the FOV label, re-clusters, and **re-verifies** that the split actually collapsed before accepting the result.
 
 ---
 
@@ -172,7 +199,7 @@ Bulk runs can set **pathway interests** at config time (e.g. `cell cycle, apopto
 | **Persistence** | `pipeline_runs.sqlite` | LangGraph `SqliteSaver`; created on first run |
 | **LLM** | `OLLAMA_MODEL` or `OPENAI_API_KEY` | Final report + RAG chat; optional |
 
-Choosing `bulk_rnaseq` at the prompt runs bulk → enrichment (if bulk succeeds) → final report → optional RAG Q&A. Choosing `scrna` runs scRNA only, then report and optional RAG.
+The orchestrator **auto-detects the modality** from the input path (FASTQ/sample-sheet → bulk, 10x/h5ad → scRNA, Vizgen CSVs or spatial-coordinate h5ad → spatial) via `scripts/common/data_detect.py`, shows the evidence, and asks for confirmation rather than presenting a blind menu. A confirmed `bulk_rnaseq` run chains bulk → enrichment (if bulk succeeds) → final report → optional RAG Q&A; `scrna` runs scRNA only, then report and optional RAG.
 
 ---
 
@@ -227,7 +254,7 @@ export OPENAI_API_KEY=sk-...
 export OPENAI_MODEL=gpt-4o-mini   # optional, default is gpt-4o-mini
 ```
 
-If neither is set, all summarise nodes fall back to a deterministic text summary.
+These can also be placed in a `.env` file at the repo root — it is auto-loaded via `python-dotenv`. If neither provider is set, all summarise nodes **and every agentic gate** (FastQC, trimming, data-type detection, FOV-bias) fall back to deterministic rule-based logic.
 
 ---
 
@@ -243,7 +270,11 @@ scripts/
 │   ├── graph_state.py       PipelineState TypedDict
 │   └── graph.py             graph builder
 ├── scrna/                   scRNA-seq sub-pipeline  (same structure)
-├── spatial/                 spatial transcriptomics stub
+├── spatial/                 spatial (imaging / Vizgen) sub-pipeline — in development
+│   ├── config.py            SpatialConfig (Vizgen CSVs + QC thresholds)
+│   ├── nodes.py             load_vizgen, spatial_qc, clustering, fov_bias_check
+│   ├── graph_nodes.py       LLM FOV-bias adjudication + guardrails
+│   └── graph.py             graph builder (assembly in progress)
 ├── enrichment/              GNN-PPI enrichment sub-pipeline
 │   ├── pathway_embed.py     KEGG pathway embeddings (BioBERT)
 │   ├── reactome_embed.py    Reactome pathway embeddings
@@ -261,10 +292,12 @@ scripts/
 │   ├── answerer.py          Phase 3 — LLM synthesis with citations
 │   ├── augment.py           Phase 4a — auto-augment pipeline summaries
 │   ├── graph_state.py       Phase 4b — RagChatState
-│   ├── graph_nodes.py       Phase 4b — chat loop nodes
+│   ├── artifact_reader.py   scan a run dir for STAR/featureCounts/FastQC/DEG/GNN artifacts
+│   ├── graph_nodes.py       Phase 4b — chat loop nodes (+ LLM data-type inference)
 │   └── graph.py             Phase 4b — interactive Q&A graph
 └── common/
-    └── node_result.py       NodeResult dataclass (shared across pipelines)
+    ├── node_result.py       NodeResult dataclass (shared across pipelines)
+    └── data_detect.py       auto-detect modality (bulk / scRNA / spatial) from a path
 ```
 
 ---
