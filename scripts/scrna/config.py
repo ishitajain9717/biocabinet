@@ -1,12 +1,13 @@
 """Configuration + interactive prompts for the scRNA-seq pipeline."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-
 # ---------- prompt helpers ----------
+
 
 def _ask(prompt: str, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
@@ -50,13 +51,15 @@ def _ask_choice(prompt: str, choices: list[str], default: str) -> str:
 
 # ---------- config dataclass ----------
 
+
 @dataclass
 class ScrnaConfig:
     """Configuration for the scRNA-seq pipeline."""
+
     # ---- input ----
-    input_kind: str                     # "h5ad" | "10x" | "pbmc3k"
+    input_kind: str  # "h5ad" | "10x" | "pbmc3k"
     out_dir: Path
-    input_path: Optional[Path] = None   # None when input_kind == "pbmc3k"
+    input_path: Optional[Path] = None  # None when input_kind == "pbmc3k"
 
     # ---- filter thresholds ----
     min_cells_per_gene: int = 3
@@ -69,8 +72,8 @@ class ScrnaConfig:
 
     # ---- pca ----
     n_pcs: int = 50
-    scale_clip: bool = True            # clip scaled values during sc.pp.scale
-    scale_max_value: float = 10.0      # clip threshold (only used if scale_clip)
+    scale_clip: bool = True  # clip scaled values during sc.pp.scale
+    scale_max_value: float = 10.0  # clip threshold (only used if scale_clip)
 
     # ---- clustering ----
     n_neighbors: int = 15
@@ -79,8 +82,18 @@ class ScrnaConfig:
     # ---- markers ----
     n_top_markers: int = 25
 
+    # ---- trajectory + pseudotime ----
+    run_trajectory: bool = False  # PAGA graph + PAGA-init UMAP
+    n_waypoints: int = 500  # Palantir waypoints; more = smoother but slower
+
+    # ---- benchmarking ----
+    run_benchmark: bool = False  # ARI/NMI vs ground truth + per-node timing
+    true_labels_col: Optional[str] = None  # obs column with true labels;
+    # None = auto-load pbmc3k reference
+
 
 # ---------- top-level collector ----------
+
 
 def collect_config_from_user() -> ScrnaConfig:
     print("=== scRNA-seq config ===")
@@ -95,15 +108,42 @@ def collect_config_from_user() -> ScrnaConfig:
     if input_kind == "h5ad":
         input_path = _ask_path("Path to .h5ad file")
     elif input_kind == "10x":
-        input_path = _ask_path("Path to 10x folder (containing matrix.mtx + barcodes.tsv + features.tsv)")
+        input_path = _ask_path(
+            "Path to 10x folder (containing matrix.mtx + barcodes.tsv + features.tsv)"
+        )
 
     out_dir_raw = _ask("Output directory (will be created)")
     out_dir = Path(out_dir_raw).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    use_defaults = _ask_bool("Use default thresholds for filter/normalize/pca/cluster?", default=True)
+    run_benchmark = _ask_bool(
+        "Run benchmarking (ARI/NMI vs ground truth labels + per-node timing)?",
+        default=False,
+    )
+    true_labels_col: Optional[str] = None
+    if run_benchmark and input_kind != "pbmc3k":
+        col = _ask(
+            "Column in adata.obs with true labels " "(press Enter to skip ARI/NMI)",
+            default="",
+        )
+        true_labels_col = col or None
+
+    run_trajectory = _ask_bool(
+        "Run PAGA trajectory inference after clustering?", default=False
+    )
+
+    use_defaults = _ask_bool(
+        "Use default thresholds for filter/normalize/pca/cluster?", default=True
+    )
     if use_defaults:
-        return ScrnaConfig(input_kind=input_kind, input_path=input_path, out_dir=out_dir)
+        return ScrnaConfig(
+            input_kind=input_kind,
+            input_path=input_path,
+            out_dir=out_dir,
+            run_trajectory=run_trajectory,
+            run_benchmark=run_benchmark,
+            true_labels_col=true_labels_col,
+        )
 
     scale_clip = _ask_bool("Clip scaled gene values? (recommended)", default=True)
     scale_max_value = (
@@ -114,6 +154,9 @@ def collect_config_from_user() -> ScrnaConfig:
         input_kind=input_kind,
         input_path=input_path,
         out_dir=out_dir,
+        run_trajectory=run_trajectory,
+        run_benchmark=run_benchmark,
+        true_labels_col=true_labels_col,
         min_cells_per_gene=_ask_int("min_cells_per_gene", 3),
         min_genes_per_cell=_ask_int("min_genes_per_cell", 200),
         max_pct_mt=_ask_float("max_pct_mt", 5.0),

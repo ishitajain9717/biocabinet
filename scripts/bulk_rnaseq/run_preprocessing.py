@@ -45,7 +45,7 @@ def _run_sample(
 ) -> tuple[list[NodeResult], Path | None, dict | None]:
     """Run all per-sample nodes.
 
-    Returns (history, counts_txt | None, qc_decision | None).
+    Returns (history, counts_tsv | None, qc_decision | None).
     qc_decision is {"decision": "PASS"|"WARN"|"FAIL", "reason": str} when the
     FastQC gate runs, or None if FastQC itself failed.
     """
@@ -114,7 +114,7 @@ def _run_sample(
     if not fc.ok:
         return history, None, qc_decision
 
-    return history, Path(fc.outputs["counts_txt"]), qc_decision
+    return history, Path(fc.outputs["counts_tsv"]), qc_decision
 
 
 def main() -> int:
@@ -126,16 +126,16 @@ def main() -> int:
 
     for sample in cfg.samples:
         print(f"\n--- Sample: {sample.name} ---")
-        history, counts_txt, qc_dec = _run_sample(cfg, sample)
+        history, counts_tsv, qc_dec = _run_sample(cfg, sample)
         per_sample_histories[sample.name] = history
         for r in history:
             status = "OK  " if r.ok else "FAIL"
             print(f"  [{status}] {r.name}: {r.message}")
-        if counts_txt is None:
+        if counts_tsv is None:
             failed.append(sample.name)
             print("=> stopped early for this sample")
         else:
-            count_results.append((sample.name, counts_txt))
+            count_results.append((sample.name, counts_tsv))
 
     norm_result: NodeResult | None = None
     if count_results:

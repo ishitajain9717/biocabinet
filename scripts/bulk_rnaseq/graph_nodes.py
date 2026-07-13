@@ -92,11 +92,17 @@ def _llm_fastqc_gate(sample_name: str, fastqc_metrics: dict) -> tuple[str, str]:
                 reason = rea_match.group(1).strip() if rea_match else text
                 return decision, reason
         except Exception:
-            pass  # fall through to rule-based
+            print(
+                "Falling back to deterministic rules " "(no LLM configured)."
+            )  # fall through to rule-based
 
     # Rule-based fallback (no LLM)
     fails = [m for m, s in modules.items() if s == "fail"]
     warns = [m for m, s in modules.items() if s == "warn"]
+
+    # If core metrics are absent we have no basis to call PASS — flag it.
+    if mean_q is None and not modules:
+        return "FAIL", "quality metrics missing — FastQC report could not be parsed"
 
     if (mean_q is not None and mean_q < 20) or (pct_ada is not None and pct_ada > 50):
         reason = f"mean quality={mean_q}, adapter={pct_ada}% — hard thresholds exceeded"
@@ -140,6 +146,88 @@ _TRIM_STEP_SAFE_RE = re.compile(
     r"|SLIDINGWINDOW:\d+:\d+"
     r"|MINLEN:\d+)$"
 )
+
+# Hard bounds for each step's numeric parameters.
+# Anything outside these ranges is either a hallucination or dangerously aggressive.
+_TRIM_PARAM_BOUNDS: dict[str, list[tuple[int, int]]] = {
+    "LEADING": [(3, 30)],  # single quality value
+    "TRAILING": [(3, 30)],  # single quality value
+    "SLIDINGWINDOW": [(2, 10), (5, 30)],  # window size, quality threshold
+    "MINLEN": [(20, 150)],  # read length after trimming
+}
+
+
+def _validate_trim_step_values(
+    steps: list[str],
+    fastqc_metrics: dict,
+) -> tuple[list[str], list[str]]:
+    """Check that numeric parameter values are within safe ranges and are
+    appropriate given the actual FastQC metrics.
+
+    Returns (safe_steps, problems) where problems is a list of human-readable
+    descriptions of anything that was clamped or removed.
+    """
+    mean_q = fastqc_metrics.get("mean_quality")
+    safe: list[str] = []
+    problems: list[str] = []
+
+    for step in steps:
+        name = step.split(":")[0].upper()
+
+        # ILLUMINACLIP handled separately — pass through here
+        if name == "ILLUMINACLIP":
+            safe.append(step)
+            continue
+
+        bounds = _TRIM_PARAM_BOUNDS.get(name)
+        if bounds is None:
+            safe.append(step)
+            continue
+
+        raw_vals = step.split(":")[1:]
+        clamped_vals: list[str] = []
+        step_ok = True
+
+        for i, (raw, (lo, hi)) in enumerate(zip(raw_vals, bounds)):
+            try:
+                v = int(raw)
+            except ValueError:
+                problems.append(f"{step}: non-integer value '{raw}' — step removed")
+                step_ok = False
+                break
+            if v < lo or v > hi:
+                problems.append(
+                    f"{step}: {name} param {i+1} = {v} out of range [{lo},{hi}]"
+                    f" — clamped to {max(lo, min(hi, v))}"
+                )
+                v = max(lo, min(hi, v))
+            clamped_vals.append(str(v))
+
+        if not step_ok:
+            continue
+
+        rebuilt = name + ":" + ":".join(clamped_vals)
+
+        # Appropriateness check: if overall quality is good, flag aggressive trimming
+        if mean_q is not None and mean_q >= 30:
+            if name in ("LEADING", "TRAILING") and int(clamped_vals[0]) > 20:
+                problems.append(
+                    f"{rebuilt}: quality threshold {clamped_vals[0]} is aggressive "
+                    f"for mean_quality={mean_q:.0f} — clamped to 20"
+                )
+                clamped_vals[0] = "20"
+                rebuilt = name + ":" + ":".join(clamped_vals)
+            if name == "SLIDINGWINDOW" and int(clamped_vals[1]) > 20:
+                problems.append(
+                    f"{rebuilt}: SLIDINGWINDOW quality {clamped_vals[1]} is aggressive "
+                    f"for mean_quality={mean_q:.0f} — clamped to 15"
+                )
+                clamped_vals[1] = "15"
+                rebuilt = name + ":" + ":".join(clamped_vals)
+
+        safe.append(rebuilt)
+
+    return safe, problems
 
 
 def _llm_trim_gate(
@@ -216,7 +304,15 @@ def _llm_trim_gate(
                     )
                     # Don't use partial results; fall through to rule-based
                 elif validated:
-                    # Full clean output from LLM — apply sanity checks
+                    # Syntax is clean — now validate parameter values and
+                    # check appropriateness against the actual metrics
+                    validated, value_problems = _validate_trim_step_values(
+                        validated, fastqc_metrics
+                    )
+                    if value_problems:
+                        for p in value_problems:
+                            print(f"  [Trim gate] Value guardrail: {p}", flush=True)
+                    # Sanity check: don't clip adapters that aren't there
                     has_clip = any(s.startswith("ILLUMINACLIP") for s in validated)
                     adapter_clean = (pct_ada is None or pct_ada < 5) and modules.get(
                         "Adapter Content", "pass"
@@ -304,7 +400,7 @@ def graph_node_run_samples(state: PipelineState) -> dict:
 
     for sample in cfg.samples:
         print(f"\n--- Sample: {sample.name} ---")
-        sample_history, counts_txt, qc_dec = _run_sample(
+        sample_history, counts_tsv, qc_dec = _run_sample(
             cfg,
             sample,
             llm_fastqc_gate_fn=_llm_fastqc_gate,
@@ -319,12 +415,12 @@ def graph_node_run_samples(state: PipelineState) -> dict:
             status = "OK  " if r.ok else "FAIL"
             print(f"  [{status}] {r.name}: {r.message}")
 
-        if counts_txt is None:
+        if counts_tsv is None:
             failed.append(sample.name)
             print(f"  => stopped early for {sample.name}")
         else:
             # Convert Path -> str so the SQLite checkpointer can JSON-serialise it.
-            count_results.append((sample.name, str(counts_txt)))
+            count_results.append((sample.name, str(counts_tsv)))
 
     return {
         "node_history": history,
@@ -378,7 +474,6 @@ def graph_node_deg(state: PipelineState) -> dict:
     # missing we skip rather than crash, so the rest of the pipeline still
     # finishes cleanly.
     if not raw_counts:
-        from scripts.common.node_result import NodeResult
 
         result = NodeResult(
             name="deg",

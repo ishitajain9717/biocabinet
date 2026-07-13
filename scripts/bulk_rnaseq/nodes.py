@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import subprocess
 import zipfile
@@ -29,7 +30,7 @@ def _tail(text: str, n: int = 200) -> str:
 # ---------- FastQC report parser ----------
 
 
-def _parse_fastqc_report(qc_dir: Path, sample_name: str) -> dict:
+def _parse_fastqc_report(qc_dir: Path, sample_name: str) -> dict:  # type: ignore
     """Extract module statuses and key metrics from a FastQC zip report.
 
     Returns a dict with:
@@ -65,7 +66,8 @@ def _parse_fastqc_report(qc_dir: Path, sample_name: str) -> dict:
             if not data_files:
                 return result
             content = zf.read(data_files[0]).decode("utf-8", errors="replace")
-    except Exception:
+    except Exception as e:
+        result["raw_summary"] = f"Error reading FastQC zip: {e}"
         return result
 
     result["raw_summary"] = content[:2000]
@@ -157,6 +159,23 @@ def node_fastqc(cfg: PreprocessingConfig, sample: Sample) -> NodeResult:
         )
 
     report = _parse_fastqc_report(out_dir, sample.name)
+
+    # If FastQC ran but we couldn't parse the zip/quality scores, treat it
+    # as a failed node so the QC gate doesn't silently pass a sample with
+    # no readable metrics.
+    metrics_missing = report["mean_quality"] is None and not report["module_statuses"]
+    if metrics_missing:
+        return NodeResult(
+            name="fastqc",
+            ok=False,
+            message=(
+                "FastQC ran (rc=0) but quality report could not be parsed "
+                "— zip may be missing or corrupt"
+            ),
+            outputs={"qc_dir": str(out_dir)},
+            metrics={"returncode": rc},
+        )
+
     return NodeResult(
         name="fastqc",
         ok=True,
@@ -191,11 +210,36 @@ def node_trim(
         When None the hardcoded defaults are used.
         When empty-list the run is treated as skip.
     """
-    # Determine effective skip flag: LLM pass empty list → skip trim
+    # Determine whether to skip:
+    #   trim_steps=None  → honour cfg.skip_trim (no LLM gate involved)
+    #   trim_steps=[]    → LLM decided no trimming needed
+    #   trim_steps=[...] → LLM generated steps; run them if jar is available,
+    #                      otherwise warn and fall back to skipping so the
+    #                      pipeline can continue rather than hard-failing just
+    #                      because the user set skip_trim=True at config time.
+    llm_wants_trim = trim_steps is not None and len(trim_steps) > 0
+
+    if llm_wants_trim and cfg.trimmomatic_jar is None:
+        print(
+            f"  [trim] WARNING: LLM requested trimming for {sample.name} but "
+            "trimmomatic_jar is not configured — skipping trim and continuing.",
+            flush=True,
+        )
+        outs: dict[str, str] = {"r1": str(sample.r1)}
+        if sample.r2 is not None:
+            outs["r2"] = str(sample.r2)
+        return NodeResult(
+            name="trim",
+            ok=True,
+            message="skipped (LLM requested trim but trimmomatic_jar not configured)",
+            outputs=outs,
+            metrics={"trim_steps_requested": trim_steps},
+        )
+
     effective_skip = cfg.skip_trim if trim_steps is None else (len(trim_steps) == 0)
 
     if effective_skip:
-        outs: dict[str, str] = {"r1": str(sample.r1)}
+        outs = {"r1": str(sample.r1)}
         if sample.r2 is not None:
             outs["r2"] = str(sample.r2)
         return NodeResult(name="trim", ok=True, message="skipped", outputs=outs)
@@ -365,7 +409,7 @@ def node_align(
 
     bam_dir = cfg.out_dir / "03_bam" / sample.name
     bam_dir.mkdir(parents=True, exist_ok=True)
-    prefix = bam_dir / f"{sample.name}_"
+    prefix = str(bam_dir / sample.name)
 
     cmd = [
         "STAR",
@@ -379,7 +423,7 @@ def node_align(
     if r2 is not None:
         cmd.append(str(r2))
     if str(r1).endswith(".gz"):
-        cmd += ["--readFilesCommand", "gunzip", "-c"]
+        cmd += ["--readFilesCommand", "zcat"]
     cmd += [
         "--outSAMtype",
         "BAM",
@@ -389,8 +433,8 @@ def node_align(
     ]
 
     _, err, rc = _run(cmd)
-    bam_path = Path(str(prefix) + "Aligned.sortedByCoord.out.bam")
-    log_path = Path(str(prefix) + "Log.final.out")
+    bam_path = bam_dir / f"{sample.name}Aligned.sortedByCoord.out.bam"
+    log_path = bam_dir / f"{sample.name}Log.final.out"
 
     if rc != 0 or not bam_path.exists():
         star_metrics = _parse_star_log(log_path)
@@ -433,7 +477,7 @@ def node_featurecounts(
 ) -> NodeResult:
     counts_dir = cfg.out_dir / "04_counts" / sample.name
     counts_dir.mkdir(parents=True, exist_ok=True)
-    out_file = counts_dir / "counts.txt"
+    out_file = counts_dir / "counts.tsv"
 
     strand_flag = _STRAND_MAP.get(cfg.strand, "0")
     cmd = [
@@ -472,7 +516,7 @@ def node_featurecounts(
         name="featurecounts",
         ok=ok,
         message="ok" if ok else "counts file unexpectedly small",
-        outputs={"counts_txt": str(out_file)},
+        outputs={"counts_tsv": str(out_file)},
         metrics={"returncode": rc, "n_lines": n_lines},
     )
 
@@ -480,7 +524,7 @@ def node_featurecounts(
 # ---------- normalization ----------
 
 
-def _parse_counts(counts_txt: Path) -> tuple[list[str], list[int], list[int]]:
+def _parse_counts(counts_tsv: Path) -> tuple[list[str], list[int], list[int]]:
     """Parse a featureCounts output file.
 
     Returns (gene_ids, lengths, counts).
@@ -490,7 +534,7 @@ def _parse_counts(counts_txt: Path) -> tuple[list[str], list[int], list[int]]:
     gene_ids: list[str] = []
     lengths: list[int] = []
     counts: list[int] = []
-    with counts_txt.open() as fh:
+    with counts_tsv.open() as fh:
         for line in fh:
             if line.startswith("#"):
                 continue
@@ -531,7 +575,7 @@ def node_normalize(
 ) -> NodeResult:
     """Merge per-sample counts and write normalised matrices to 05_normalized/.
 
-    count_results: list of (sample_name, path_to_counts_txt)
+    count_results: list of (sample_name, path_to_counts_tsv)
     """
     norm_dir = cfg.out_dir / "05_normalized"
     norm_dir.mkdir(parents=True, exist_ok=True)
@@ -540,8 +584,8 @@ def node_normalize(
     all_lengths: list[int] = []
     sample_counts: dict[str, list[int]] = {}
 
-    for sname, counts_txt in count_results:
-        gene_ids, lengths, counts = _parse_counts(counts_txt)
+    for sname, counts_tsv in count_results:
+        gene_ids, lengths, counts = _parse_counts(counts_tsv)
         if not all_gene_ids:
             all_gene_ids = gene_ids
             all_lengths = lengths
@@ -633,14 +677,85 @@ def _read_counts_raw(raw_tsv: Path) -> tuple[list[str], list[str], list[list[int
     return gene_ids, sample_names, matrix
 
 
+def _fetch_string_pairs(
+    ensps: list[str],
+    confidence: int = 400,
+) -> set[tuple[str, str]]:
+    """Query the STRING DB REST API for known interactions among the given ENSPs.
+
+    POSTs to https://string-db.org/api/json/network with 9606-prefixed
+    identifiers and the required_score threshold (0–1000).
+
+    Returns a set of (stringId_A, stringId_B) tuples where
+    stringId_A < stringId_B so each pair appears exactly once.
+    Returns an empty set on any network or parsing failure so the
+    pipeline never crashes when STRING is unreachable.
+    """
+    import json
+    import urllib.parse
+    import urllib.request
+
+    if not ensps:
+        return set()
+
+    identifiers = "\n".join(f"9606.{e}" for e in ensps)
+    payload = urllib.parse.urlencode(
+        {
+            "identifiers": identifiers,
+            "species": 9606,
+            "required_score": confidence,
+            "caller_identity": "rnaseq_package",
+        }
+    ).encode()
+
+    try:
+        req = urllib.request.Request(
+            "https://string-db.org/api/json/network",
+            data=payload,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            records = json.loads(resp.read().decode())
+    except Exception as exc:
+        print(
+            f"  [deg] WARNING: STRING API call failed "
+            f"({type(exc).__name__}: {exc}) — skipping STRING pairs, "
+            "all DEG pairs will use significance-ranked fallback.",
+            flush=True,
+        )
+        return set()
+
+    pairs: set[tuple[str, str]] = set()
+    for rec in records:
+        a = rec.get("stringId_A", "")
+        b = rec.get("stringId_B", "")
+        if a and b and a != b:
+            pairs.add((min(a, b), max(a, b)))
+
+    return pairs
+
+
 def _build_deg_pairs_tsv(
     significant_genes: list[str],
+    gene_scores: dict[str, float],
     out_path: Path,
-    max_pairs: int = 5000,
-) -> tuple[int, int, int]:
-    """Map ENSG → ENSP via mygene, build all combinations, cap at max_pairs.
+    string_confidence: int = 400,
+    fallback_max_pairs: int = 500,
+) -> tuple[int, int, int, int]:
+    """Build ENSP interaction pairs using STRING first, orphan fallback second.
 
-    Returns (n_genes_mapped, n_total_ensps, n_pairs_written).
+    Steps:
+      1. Map ENSG → ENSP via mygene (unversioned IDs).
+      2. Query STRING for known interactions among all mapped ENSPs.
+      3. Write every STRING-backed pair (no cap) tagged source=string.
+      4. Find orphan ENSPs (zero STRING edges); rank their source genes by
+         significance score descending; write combinatorial pairs among
+         those orphans up to fallback_max_pairs tagged source=fallback.
+
+    The ``source`` column lets downstream enrichment treat STRING pairs as
+    known interactions and fallback pairs as novel hypotheses.
+
+    Returns (n_genes_mapped, n_ensps, n_string_pairs, n_fallback_pairs).
     """
     from itertools import combinations
 
@@ -648,7 +763,13 @@ def _build_deg_pairs_tsv(
 
     mg = mygene.MyGeneInfo()
 
-    bare_genes = [_strip_ensembl_version(g) for g in significant_genes]
+    # mygene returns bare (unversioned) query IDs; keep a reverse map
+    # so we can look up the original gene_id for score retrieval.
+    bare_to_orig: dict[str, str] = {
+        _strip_ensembl_version(g): g for g in significant_genes
+    }
+    bare_genes = list(bare_to_orig.keys())
+
     results = mg.querymany(
         bare_genes,
         scopes="ensembl.gene",
@@ -657,41 +778,79 @@ def _build_deg_pairs_tsv(
         verbose=False,
     )
 
-    all_ensps: list[str] = []
+    # bare ENSP → original gene_id (for significance-based orphan ranking)
+    ensp_to_gene: dict[str, str] = {}
     n_mapped = 0
+
     for r in results:
+        query_bare = r.get("query", "")
         ens = r.get("ensembl")
         if not ens:
             continue
         n_mapped += 1
+        orig_gene = bare_to_orig.get(query_bare, query_bare)
+
+        proteins: list[str] = []
         if isinstance(ens, list):
             for e in ens:
                 p = e.get("protein")
                 if isinstance(p, list):
-                    all_ensps.extend(p)
+                    proteins.extend(p)
                 elif isinstance(p, str):
-                    all_ensps.append(p)
+                    proteins.append(p)
         else:
             p = ens.get("protein")
             if isinstance(p, list):
-                all_ensps.extend(p)
+                proteins.extend(p)
             elif isinstance(p, str):
-                all_ensps.append(p)
+                proteins.append(p)
 
-    # dedup + sort for deterministic output
-    all_ensps = sorted(set(all_ensps))
+        for ensp in proteins:
+            # first gene to map this ENSP wins (avoids overwriting with a
+            # less-significant gene if the same protein is shared)
+            ensp_to_gene.setdefault(ensp, orig_gene)
 
-    pairs_written = 0
+    all_ensps = sorted(set(ensp_to_gene.keys()))
+
+    # ---- STRING-backed pairs (no cap) --------------------------------
+    string_pairs = _fetch_string_pairs(all_ensps, confidence=string_confidence)
+
+    # Track which bare ENSPs appear in at least one STRING edge.
+    # STRING IDs are formatted as "9606.ENSP..." — strip the taxon prefix.
+    ensps_with_edges: set[str] = set()
+    for sid_a, sid_b in string_pairs:
+        ensps_with_edges.add(sid_a.split(".", 1)[-1])
+        ensps_with_edges.add(sid_b.split(".", 1)[-1])
+
+    # ---- Significance-ranked orphan fallback -------------------------
+    orphan_ensps = [e for e in all_ensps if e not in ensps_with_edges]
+
+    # Score = -log10(padj) × |log2FC|: captures both significance and
+    # effect size so the highest-priority novel genes pair first.
+    orphan_ensps.sort(
+        key=lambda e: gene_scores.get(ensp_to_gene.get(e, ""), 0.0),
+        reverse=True,
+    )
+
+    # ---- Write TSV ---------------------------------------------------
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w") as fh:
-        fh.write("ensp_a\tensp_b\n")
-        for a, b in combinations(all_ensps, 2):
-            if pairs_written >= max_pairs:
-                break
-            fh.write(f"9606.{a}\t9606.{b}\n")
-            pairs_written += 1
+    n_string_written = 0
+    n_fallback_written = 0
 
-    return n_mapped, len(all_ensps), pairs_written
+    with out_path.open("w") as fh:
+        fh.write("ensp_a\tensp_b\tsource\n")
+
+        for sid_a, sid_b in sorted(string_pairs):
+            fh.write(f"{sid_a}\t{sid_b}\tstring\n")
+            n_string_written += 1
+
+        for a, b in combinations(orphan_ensps, 2):
+            if n_fallback_written >= fallback_max_pairs:
+                break
+            fh.write(f"9606.{a}\t9606.{b}\tfallback\n")
+            n_fallback_written += 1
+
+    return n_mapped, len(all_ensps), n_string_written, n_fallback_written
 
 
 def node_deg(
@@ -859,22 +1018,34 @@ def node_deg(
         # ---- optional: gene → ENSP pairs for enrichment ----
         if cfg.build_pairs_for_enrichment and sig_df.shape[0] > 0:
             try:
+                # Score = -log10(padj) × |log2FC|: ranks genes by combined
+                # statistical significance and effect size so the orphan
+                # fallback prioritises the most biologically relevant hits.
+                gene_scores = {
+                    gene: -math.log10(float(row["padj"]) + 1e-300)
+                    * abs(float(row["log2FoldChange"]))
+                    for gene, row in sig_df.iterrows()
+                }
                 pairs_tsv = out_dir / "deg_pairs.tsv"
-                n_mapped, n_ensps, n_pairs = _build_deg_pairs_tsv(
+                n_mapped, n_ensps, n_string, n_fallback = _build_deg_pairs_tsv(
                     sig_df.index.tolist(),
+                    gene_scores,
                     pairs_tsv,
+                    string_confidence=cfg.string_confidence_threshold,
+                    fallback_max_pairs=cfg.pairs_fallback_max,
                 )
                 outputs["deg_pairs"] = str(pairs_tsv)
                 metrics.update(
                     {
                         "deg_pairs_n_genes_mapped": n_mapped,
                         "deg_pairs_n_ensps": n_ensps,
-                        "deg_pairs_n_written": n_pairs,
+                        "deg_pairs_n_string": n_string,
+                        "deg_pairs_n_fallback": n_fallback,
                     }
                 )
                 msg_parts.append(
                     f"; mapped {n_mapped} genes to {n_ensps} ENSPs"
-                    f" → {n_pairs} candidate pairs"
+                    f" → {n_string} STRING pairs + {n_fallback} fallback pairs"
                 )
             except Exception as exc:
                 # Don't fail the whole DEG node just because the pair builder hit

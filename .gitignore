@@ -54,3 +54,5 @@ data/*
 # Genome reference and STAR index (large, not committed)
 data/genome/
 data/star_index/
+.env
+.env

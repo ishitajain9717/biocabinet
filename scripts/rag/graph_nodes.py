@@ -238,6 +238,39 @@ _ALIGNMENT_KEYWORDS = (
     "unmapped",
 )
 
+_SCRNA_CELL_KEYWORDS = (
+    "how many cells",
+    "cell count",
+    "number of cells",
+    "cells after",
+    "cells surviving",
+    "how many genes",
+    "gene count",
+    "number of genes",
+    "genes after",
+)
+
+_SCRNA_CLUSTER_KEYWORDS = (
+    "how many clusters",
+    "cluster count",
+    "number of clusters",
+    "leiden",
+    "clusters found",
+    "clusters identified",
+)
+
+_SCRNA_MARKER_KEYWORDS = (
+    "marker gene",
+    "top gene",
+    "cluster marker",
+    "which genes",
+    "what genes",
+    "genes for cluster",
+    "genes in cluster",
+    "marker for",
+    "markers for",
+)
+
 _QC_ARTIFACT_KEYWORDS = (
     "fastqc",
     "quality score",
@@ -277,6 +310,46 @@ def _answer_from_metadata(
     q = question.lower()
     pr = pr or {}
     arts = arts or {}
+    data_type = pr.get("data_type", "bulk_rnaseq")
+
+    # ── scRNA-specific metadata answers ──────────────────────────────────────
+    if data_type == "scrna":
+        if any(kw in q for kw in _SCRNA_CELL_KEYWORDS):
+            n_cells = pr.get("n_cells")
+            n_genes = pr.get("n_genes")
+            parts = []
+            if n_cells is not None:
+                parts.append(f"Cells surviving QC + filtering: {n_cells:,}")
+            if n_genes is not None:
+                parts.append(f"Genes surviving filtering: {n_genes:,}")
+            return "\n".join(parts) if parts else "Cell/gene counts are not available."
+
+        if any(kw in q for kw in _SCRNA_CLUSTER_KEYWORDS):
+            n_cl = pr.get("n_clusters")
+            if n_cl is not None:
+                return f"Leiden clustering identified {n_cl} clusters."
+            return "Cluster count is not available for this run."
+
+        if any(kw in q for kw in _SCRNA_MARKER_KEYWORDS):
+            markers = pr.get("markers_top") or []
+            n_cl = pr.get("n_clusters_with_markers")
+            if not markers:
+                return "Marker gene data is not available for this run."
+            lines = [f"Top marker genes across {n_cl} cluster(s):"]
+            current_cluster = None
+            for m in markers:
+                if m["cluster"] != current_cluster:
+                    current_cluster = m["cluster"]
+                    lines.append(f"  Cluster {current_cluster}:")
+                direction = "▲" if m["logfoldchange"] >= 0 else "▼"
+                lines.append(
+                    f"    {direction} {m['gene']}"
+                    f"  log2FC={m['logfoldchange']:+.2f}"
+                    f"  padj={m['pval_adj']:.2e}"
+                )
+            return "\n".join(lines)
+
+    # ── bulk-specific metadata answers ───────────────────────────────────────
 
     # --- alignment / mapping stats ---
     if any(kw in q for kw in _ALIGNMENT_KEYWORDS):
@@ -442,15 +515,28 @@ def _answer_from_metadata(
 # node 0 — startup: LLM infers experiment type, confirms with user
 # ---------------------------------------------------------------------------
 
-_INFER_SYSTEM_PROMPT = (
+_INFER_SYSTEM_PROMPT_BULK = (
     "You are a bioinformatics assistant. You have been given a report of all "
-    "artifacts produced by an RNA-seq pipeline run. Based on this data, "
+    "artifacts produced by a bulk RNA-seq pipeline run. Based on this data, "
     "characterise the experiment in 4–6 bullet points covering:\n"
     "  • Experiment type (bulk RNA-seq, paired-end / single-end)\n"
     "  • Comparison (treated vs control, conditions)\n"
     "  • Data quality (alignment rate, adapter contamination, DEG count)\n"
     "  • Downstream results (PPI model performance if available)\n"
     "  • Any notable issues (failed samples, low mapping, etc.)\n\n"
+    "Be concise and factual. Only state what the data shows. "
+    "Do not speculate beyond the numbers."
+)
+
+_INFER_SYSTEM_PROMPT_SCRNA = (
+    "You are a bioinformatics assistant. You have been given a report of all "
+    "artifacts produced by a single-cell RNA-seq (scRNA-seq) pipeline run. "
+    "Based on this data, characterise the experiment in 4–6 bullet points covering:\n"
+    "  • Experiment type (scRNA-seq, dataset used)\n"
+    "  • Cell and gene counts after QC and filtering\n"
+    "  • Number of Leiden clusters identified\n"
+    "  • Top marker genes per cluster (if available)\n"
+    "  • Any notable issues (high mitochondrial %, low cell counts, etc.)\n\n"
     "Be concise and factual. Only state what the data shows. "
     "Do not speculate beyond the numbers."
 )
@@ -467,6 +553,7 @@ def graph_node_infer_data_type(state: RagChatState) -> dict:
 
     arts = state.get("run_artifacts") or {}
     pr = state.get("pipeline_results") or {}
+    data_type = pr.get("data_type", "bulk_rnaseq")
 
     # Build the data block the LLM will read
     try:
@@ -477,9 +564,14 @@ def graph_node_infer_data_type(state: RagChatState) -> dict:
         artifact_block = "(artifact scan not available)"
 
     try:
-        from scripts.rag.pipeline_context import format_pipeline_results_for_prompt
+        if data_type == "scrna":
+            from scripts.rag.pipeline_context import format_scrna_results_for_prompt
 
-        results_block = format_pipeline_results_for_prompt(pr)
+            results_block = format_scrna_results_for_prompt(pr)
+        else:
+            from scripts.rag.pipeline_context import format_pipeline_results_for_prompt
+
+            results_block = format_pipeline_results_for_prompt(pr)
     except Exception:
         results_block = ""
 
@@ -488,6 +580,12 @@ def graph_node_infer_data_type(state: RagChatState) -> dict:
     print("\n" + "═" * 60)
     print("  RAG startup — reading pipeline artifacts...")
     print("═" * 60)
+
+    system_prompt = (
+        _INFER_SYSTEM_PROMPT_SCRNA
+        if data_type == "scrna"
+        else _INFER_SYSTEM_PROMPT_BULK
+    )
 
     experiment_summary = ""
 
@@ -501,27 +599,39 @@ def graph_node_infer_data_type(state: RagChatState) -> dict:
             print("  Asking LLM to characterise the experiment...", flush=True)
             resp = llm.invoke(
                 [
-                    SystemMessage(content=_INFER_SYSTEM_PROMPT),
+                    SystemMessage(content=system_prompt),
                     HumanMessage(content=data_block),
                 ]
             )
             experiment_summary = resp.content.strip()
         else:
             # Deterministic fallback summary
-            lines = ["Experiment characterisation (automatic):"]
-            conds = pr.get("conditions") or {}
-            if conds:
-                lines.append(
-                    f"  • Comparison : {conds.get('treated','?')} vs "
-                    f"{conds.get('reference','?')}"
-                )
-            n_ok = pr.get("n_samples_ok") or arts.get("config", {})
-            if isinstance(n_ok, int):
-                lines.append(f"  • Samples completed: {n_ok}")
-            if pr.get("n_deg_significant") is not None:
-                lines.append(f"  • Significant DEGs : {pr['n_deg_significant']}")
-            if arts.get("gnn_f1") is not None:
-                lines.append(f"  • GNN PPI model F1 : {arts['gnn_f1']:.3f}")
+            if data_type == "scrna":
+                lines = ["Experiment characterisation (scRNA-seq):"]
+                if pr.get("n_cells") is not None:
+                    lines.append(f"  • Cells after QC   : {pr['n_cells']:,}")
+                if pr.get("n_genes") is not None:
+                    lines.append(f"  • Genes after QC   : {pr['n_genes']:,}")
+                if pr.get("n_clusters") is not None:
+                    lines.append(f"  • Leiden clusters  : {pr['n_clusters']}")
+                n_cl_m = pr.get("n_clusters_with_markers")
+                if n_cl_m is not None:
+                    lines.append(f"  • Clusters w/ markers: {n_cl_m}")
+            else:
+                lines = ["Experiment characterisation (bulk RNA-seq):"]
+                conds = pr.get("conditions") or {}
+                if conds:
+                    lines.append(
+                        f"  • Comparison : {conds.get('treated','?')} vs "
+                        f"{conds.get('reference','?')}"
+                    )
+                n_ok = pr.get("n_samples_ok") or arts.get("config", {})
+                if isinstance(n_ok, int):
+                    lines.append(f"  • Samples completed: {n_ok}")
+                if pr.get("n_deg_significant") is not None:
+                    lines.append(f"  • Significant DEGs : {pr['n_deg_significant']}")
+                if arts.get("gnn_f1") is not None:
+                    lines.append(f"  • GNN PPI model F1 : {arts['gnn_f1']:.3f}")
             experiment_summary = "\n".join(lines)
     except Exception as exc:
         experiment_summary = f"(could not infer experiment type: {exc})"

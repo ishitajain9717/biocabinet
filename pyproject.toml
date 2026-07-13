@@ -35,12 +35,14 @@ dependencies = [
     # ── Bioinformatics ──────────────────────────────────────────────────────
     "pydeseq2>=0.4",               # differential expression (DESeq2)
     "scanpy>=1.10",                # scRNA-seq + spatial preprocessing
+    "palantir>=1.3",               # pseudotime + lineage inference (optional; trajectory only)
     "squidpy>=1.6",                # MERSCOPE/Vizgen cell-table reader
     "harmonypy>=0.0.10",           # FOV batch correction (spatial bias loop)
     "mygene>=3.2",                 # ENSG → ENSP mapping via mygene.info
 
     # ── Config / API ────────────────────────────────────────────────────────
     "python-dotenv>=1.0.0",        # auto-load LLM config from .env
+    "langsmith>=0.1",              # LangGraph tracing (opt-in via LANGCHAIN_TRACING_V2)
     "requests>=2.31",
     "tenacity>=8.2",               # retry logic for external API calls
 ]

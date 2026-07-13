@@ -200,7 +200,83 @@ def _read_inference(inference_path: str | Path | None) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# public entry point
+# scRNA reader
+# ---------------------------------------------------------------------------
+
+
+def _read_scrna_markers(markers_path: str | Path | None) -> dict[str, Any]:
+    """Read the markers.csv produced by node_markers into a structured dict.
+
+    Returns:
+        {
+            "n_clusters_with_markers": int,
+            "markers_top": [
+                {"cluster": str, "gene": str, "logfoldchange": float,
+                 "pval_adj": float},
+                ...  # up to 5 genes × up to 10 clusters
+            ],
+        }
+    """
+    result: dict[str, Any] = {"n_clusters_with_markers": None, "markers_top": []}
+    p = Path(markers_path) if markers_path else None
+    if not p or not p.exists():
+        return result
+
+    try:
+        with p.open() as fh:
+            rows = list(csv.DictReader(fh))
+
+        clusters_seen: dict[str, int] = {}  # cluster → count of genes taken
+        top: list[dict] = []
+        for r in rows:
+            cluster = r.get("cluster", "?")
+            taken = clusters_seen.get(cluster, 0)
+            if taken >= 5:
+                continue
+            try:
+                top.append(
+                    {
+                        "cluster": cluster,
+                        "gene": r.get("gene", "?"),
+                        "logfoldchange": round(float(r.get("logfoldchange") or 0), 3),
+                        "pval_adj": round(float(r.get("pval_adj") or 1), 5),
+                    }
+                )
+                clusters_seen[cluster] = taken + 1
+            except (ValueError, KeyError):
+                continue
+
+        result["n_clusters_with_markers"] = len(clusters_seen)
+        result["markers_top"] = top
+    except Exception:
+        pass
+
+    return result
+
+
+def assemble_scrna_results(
+    n_cells: int | None,
+    n_genes: int | None,
+    n_clusters: int | None,
+    markers_path: str | None,
+) -> dict[str, Any]:
+    """Build the pipeline_results dict for an scRNA run.
+
+    Shape is parallel to assemble_pipeline_results so the RAG answerer
+    receives the same ``pipeline_results`` key regardless of modality.
+    """
+    results: dict[str, Any] = {
+        "data_type": "scrna",
+        "n_cells": n_cells,
+        "n_genes": n_genes,
+        "n_clusters": n_clusters,
+    }
+    results.update(_read_scrna_markers(markers_path))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# public entry point (bulk)
 # ---------------------------------------------------------------------------
 
 
@@ -288,6 +364,43 @@ def format_pipeline_results_for_prompt(pr: dict[str, Any]) -> str:
             lines.append(
                 f"  {i['ensp_a']} — {i['ensp_b']}: "
                 f"{', '.join(i['classes'])} (p={i['top_prob']:.2f})"
+            )
+
+    return "\n".join(lines)
+
+
+def format_scrna_results_for_prompt(pr: dict[str, Any]) -> str:
+    """Return a concise text block for scRNA pipeline_results
+    to inject into the LLM prompt."""
+    if not pr:
+        return "(no scRNA pipeline results available)"
+
+    lines: list[str] = ["=== scRNA-seq run summary ==="]
+
+    if pr.get("n_cells") is not None:
+        lines.append(f"Cells after QC + filtering: {pr['n_cells']}")
+    if pr.get("n_genes") is not None:
+        lines.append(f"Genes after filtering: {pr['n_genes']}")
+    if pr.get("n_clusters") is not None:
+        lines.append(f"Leiden clusters identified: {pr['n_clusters']}")
+
+    n_clust_markers = pr.get("n_clusters_with_markers")
+    if n_clust_markers is not None:
+        lines.append(f"Clusters with marker genes: {n_clust_markers}")
+
+    markers = pr.get("markers_top") or []
+    if markers:
+        lines.append("\nTop marker genes per cluster (up to 5 per cluster):")
+        current_cluster = None
+        for m in markers:
+            if m["cluster"] != current_cluster:
+                current_cluster = m["cluster"]
+                lines.append(f"  Cluster {current_cluster}:")
+            direction = "▲" if m["logfoldchange"] >= 0 else "▼"
+            lines.append(
+                f"    {direction} {m['gene']}"
+                f"  log2FC={m['logfoldchange']:+.2f}"
+                f"  padj={m['pval_adj']:.2e}"
             )
 
     return "\n".join(lines)

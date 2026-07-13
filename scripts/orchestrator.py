@@ -50,6 +50,7 @@ class OrchestratorState(TypedDict):
     data_type: str
     child_summary: str
     child_error: str | None
+    # ── bulk-specific ────────────────────────────────────────────────────────
     bulk_deg_pairs: str | None  # path to deg_pairs.tsv if bulk DEG ran
     bulk_deg_full_path: str | None  # path to deseq2_full.tsv
     bulk_deg_sig_path: str | None  # path to deseq2_significant.tsv
@@ -57,6 +58,13 @@ class OrchestratorState(TypedDict):
     bulk_n_samples_ok: int | None  # samples that finished featurecounts
     bulk_conditions: dict | None  # {"treated": ..., "reference": ...}
     bulk_run_dir: str | None  # out_dir of the bulk run (for artifact scan)
+    # ── scRNA-specific ───────────────────────────────────────────────────────
+    scrna_n_cells: int | None  # cells surviving QC + filter
+    scrna_n_genes: int | None  # genes surviving QC + filter
+    scrna_n_clusters: int | None  # Leiden clusters found
+    scrna_markers_path: str | None  # path to markers CSV written by markers node
+    scrna_out_dir: str | None  # out_dir from ScrnaConfig (for artifact scan)
+    # ── enrichment ───────────────────────────────────────────────────────────
     enrichment_summary: str
     enrichment_error: str | None
     enrichment_ran: bool
@@ -136,6 +144,7 @@ def graph_node_ask_data_type(state: OrchestratorState) -> dict:
         "data_type": _ask_data_type(),
         "child_summary": "",
         "child_error": None,
+        # bulk
         "bulk_deg_pairs": None,
         "bulk_deg_full_path": None,
         "bulk_deg_sig_path": None,
@@ -143,6 +152,13 @@ def graph_node_ask_data_type(state: OrchestratorState) -> dict:
         "bulk_n_samples_ok": None,
         "bulk_conditions": None,
         "bulk_run_dir": None,
+        # scrna
+        "scrna_n_cells": None,
+        "scrna_n_genes": None,
+        "scrna_n_clusters": None,
+        "scrna_markers_path": None,
+        "scrna_out_dir": None,
+        # enrichment / rag
         "enrichment_summary": "",
         "enrichment_error": None,
         "enrichment_ran": False,
@@ -316,10 +332,21 @@ def build_graph(memory, parent_thread_id: str) -> StateGraph:
         }
 
     def graph_node_run_scrna(state: OrchestratorState) -> dict:
-        from scripts.scrna.graph import build_graph as build_scrna
+        from scripts.scrna.graph import run_scrna_with_interrupt
 
-        summary, error = _run_child(build_scrna, memory, parent_thread_id, "scrna")
-        return {"child_summary": summary, "child_error": error}
+        thread_id = f"{parent_thread_id}_scrna"
+        summary, error, cs = run_scrna_with_interrupt(memory, thread_id)
+        cs = cs or {}
+        cfg = cs.get("config")
+        return {
+            "child_summary": summary,
+            "child_error": error,
+            "scrna_n_cells": cs.get("n_cells"),
+            "scrna_n_genes": cs.get("n_genes"),
+            "scrna_n_clusters": cs.get("n_clusters"),
+            "scrna_markers_path": cs.get("markers_path"),
+            "scrna_out_dir": str(cfg.out_dir) if cfg is not None else None,
+        }
 
     def graph_node_run_spatial(state: OrchestratorState) -> dict:
         from scripts.spatial.graph import build_graph as build_spatial
@@ -393,41 +420,59 @@ def build_graph(memory, parent_thread_id: str) -> StateGraph:
         if ans not in ("y", "yes"):
             return {"rag_chat_ran": False}
 
-        # Reconstruct deg_sig_path from pairs dir for backwards compatibility
-        deg_sig = state.get("bulk_deg_sig_path")
-        if not deg_sig:
-            bp = state.get("bulk_deg_pairs")
-            if bp:
-                candidate = Path(bp).parent / "deseq2_significant.tsv"
-                if candidate.exists():
-                    deg_sig = str(candidate)
-
-        # Build rich structured pipeline results for the RAG answerer
-        from scripts.rag.pipeline_context import assemble_pipeline_results
-
-        pipeline_results = assemble_pipeline_results(
-            deg_full_path=state.get("bulk_deg_full_path"),
-            deg_sig_path=deg_sig,
-            n_deg_significant=state.get("bulk_n_deg"),
-            inference_path=state.get("enrichment_inf_path"),
-            n_samples_ok=state.get("bulk_n_samples_ok"),
-            conditions=state.get("bulk_conditions"),
-        )
-
-        pipeline_ctx = {
-            "deg_sig_path": deg_sig,
-            "n_deg_significant": state.get("bulk_n_deg"),
-            "child_summary": state.get("child_summary") or "",
-        }
-
         from scripts.rag.artifact_reader import scan_run_dir
         from scripts.rag.graph import build_rag_chat_graph
 
-        # Scan the bulk run directory for all artifacts
-        bulk_run_dir = state.get("bulk_run_dir") or ""
+        data_type = state.get("data_type", "bulk_rnaseq")
         run_artifacts: dict = {}
-        if bulk_run_dir and Path(bulk_run_dir).exists():
-            run_artifacts = scan_run_dir(bulk_run_dir)
+
+        if data_type == "scrna":
+            from scripts.rag.pipeline_context import assemble_scrna_results
+
+            pipeline_results = assemble_scrna_results(
+                n_cells=state.get("scrna_n_cells"),
+                n_genes=state.get("scrna_n_genes"),
+                n_clusters=state.get("scrna_n_clusters"),
+                markers_path=state.get("scrna_markers_path"),
+            )
+            pipeline_ctx = {
+                "child_summary": state.get("child_summary") or "",
+                "n_clusters": state.get("scrna_n_clusters"),
+                "markers_path": state.get("scrna_markers_path"),
+            }
+            # scan_run_dir is bulk-specific (STAR logs, FastQC, featureCounts).
+            # scRNA output is h5ad + markers.csv — already captured in pipeline_results.
+            run_artifacts = {}
+
+        else:
+            # ── bulk (default) ────────────────────────────────────────────────
+            from scripts.rag.pipeline_context import assemble_pipeline_results
+
+            # Reconstruct deg_sig_path from pairs dir for backwards compatibility
+            deg_sig = state.get("bulk_deg_sig_path")
+            if not deg_sig:
+                bp = state.get("bulk_deg_pairs")
+                if bp:
+                    candidate = Path(bp).parent / "deseq2_significant.tsv"
+                    if candidate.exists():
+                        deg_sig = str(candidate)
+
+            pipeline_results = assemble_pipeline_results(
+                deg_full_path=state.get("bulk_deg_full_path"),
+                deg_sig_path=deg_sig,
+                n_deg_significant=state.get("bulk_n_deg"),
+                inference_path=state.get("enrichment_inf_path"),
+                n_samples_ok=state.get("bulk_n_samples_ok"),
+                conditions=state.get("bulk_conditions"),
+            )
+            pipeline_ctx = {
+                "deg_sig_path": deg_sig,
+                "n_deg_significant": state.get("bulk_n_deg"),
+                "child_summary": state.get("child_summary") or "",
+            }
+            bulk_run_dir = state.get("bulk_run_dir") or ""
+            if bulk_run_dir and Path(bulk_run_dir).exists():
+                run_artifacts = scan_run_dir(bulk_run_dir)
 
         _run_child(
             build_rag_chat_graph,
@@ -467,7 +512,7 @@ def build_graph(memory, parent_thread_id: str) -> StateGraph:
         },
     )
 
-    # bulk → enrichment (auto-chain) iff bulk succeeded; otherwise straight to report
+    # bulk → enrichment (auto-chain) if bulk succeeded; otherwise straight to report
     workflow.add_conditional_edges(
         "run_bulk",
         _route_after_bulk,

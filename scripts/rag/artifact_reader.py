@@ -60,7 +60,7 @@ def _parse_star_log(log_path: Path) -> dict[str, Any]:
                     try:
                         stats[key] = int(val) if "." not in val else float(val)
                     except ValueError:
-                        pass
+                        print("No labels found")
                     break
     except Exception:
         pass
@@ -98,7 +98,7 @@ def _parse_fc_summary(summary_path: Path) -> dict[str, Any]:
             stats["pct_fc_assigned"] = round(100 * assigned / total, 1)
         stats["fc_total"] = total
     except Exception:
-        pass
+        print("Could not parse feature count summary file please check the file again")
     return stats
 
 

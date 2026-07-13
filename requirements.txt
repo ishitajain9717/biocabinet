@@ -8,6 +8,7 @@ langgraph>=1.1.9
 langgraph-checkpoint-sqlite>=3.0
 langchain-core>=0.1.0
 python-dotenv>=1.0.0
+langsmith>=0.1
 
 # Numerics
 numpy>=2.0
@@ -26,6 +27,7 @@ mygene>=3.2
 
 # scRNA-seq
 scanpy>=1.10
+palantir>=1.3          # pseudotime + lineage inference (optional; only needed when run_trajectory=True)
 # Uncomment if Leiden clustering fails at runtime:
 # leidenalg>=0.10
 # python-igraph>=0.11

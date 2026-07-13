@@ -1,4 +1,5 @@
 """Run-level config + per-sample inputs for the preprocessing pipeline."""
+
 from __future__ import annotations
 
 import csv
@@ -6,8 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-
 # ---------- prompt helpers ----------
+
 
 def ask_path(prompt: str, must_exist: bool = True) -> Path:
     raw = input(prompt).strip().strip('"').strip("'")
@@ -61,7 +62,11 @@ def ask_str(prompt: str, default: str = "") -> str:
 
 def ask_multi_choice(prompt: str, choices: list[str], default: list[str]) -> list[str]:
     """Comma-separated multi-pick. Empty input = default."""
-    raw = input(f"{prompt} {choices} (comma-separated) [{','.join(default)}]: ").strip().lower()
+    raw = (
+        input(f"{prompt} {choices} (comma-separated) [{','.join(default)}]: ")
+        .strip()
+        .lower()
+    )
     if not raw:
         return list(default)
     picks = [x.strip() for x in raw.split(",") if x.strip()]
@@ -73,12 +78,13 @@ def ask_multi_choice(prompt: str, choices: list[str], default: list[str]) -> lis
 
 # ---------- data classes ----------
 
+
 @dataclass
 class Sample:
     name: str
     r1: Path
     r2: Optional[Path] = None
-    condition: Optional[str] = None     # e.g., "control" / "treated" — required for DEG
+    condition: Optional[str] = None  # e.g., "control" / "treated" — required for DEG
 
 
 @dataclass
@@ -92,17 +98,29 @@ class PreprocessingConfig:
     trimmomatic_jar: Optional[Path] = None
     aligner: str = "star"
     strand: str = "unstranded"
-    normalizations: list[str] = field(
-        default_factory=lambda: ["tpm", "fpkm", "rpkm"]
-    )
+    normalizations: list[str] = field(default_factory=lambda: ["tpm", "fpkm", "rpkm"])
 
     # ---- DEG (PyDESeq2) ----
-    enable_deg:           bool  = False
-    reference_condition:  Optional[str] = None     # which condition is the baseline for log2FC
-    treated_condition:    Optional[str] = None     # which condition is the foreground (None = pick the other one)
-    padj_threshold:       float = 0.05
-    lfc_threshold:        float = 1.0              # |log2FC| cut for "significant"
-    build_pairs_for_enrichment: bool = True        # if True, also write deg_pairs.tsv (ENSP combinations)
+    enable_deg: bool = False
+    reference_condition: Optional[str] = (
+        None  # which condition is the baseline for log2FC
+    )
+    treated_condition: Optional[str] = (
+        None  # which condition is the foreground (None = pick the other one)
+    )
+    padj_threshold: float = 0.05
+    lfc_threshold: float = 1.0  # |log2FC| cut for "significant"
+    build_pairs_for_enrichment: bool = (
+        True  # if True, also write deg_pairs.tsv (ENSP pairs)
+    )
+
+    # ---- ENSP pair building (STRING + orphan fallback) ----
+    string_confidence_threshold: int = (
+        400  # STRING combined score 0–1000 (400 = medium confidence)
+    )
+    pairs_fallback_max: int = (
+        500  # max combinatorial pairs for orphan ENSPs (no STRING edge)
+    )
 
     # ---- RAG pathway interests (optional) ----
     pathway_interests: list[str] = field(default_factory=list)
@@ -178,7 +196,9 @@ def load_samplesheet(path: Path) -> list[Sample]:
             r2_raw = (row.get("r2") or "").strip()
             r2 = Path(r2_raw).expanduser().resolve() if r2_raw else None
             cond_raw = (row.get("condition") or "").strip() or None
-            samples.append(Sample(name=row["sample"].strip(), r1=r1, r2=r2, condition=cond_raw))
+            samples.append(
+                Sample(name=row["sample"].strip(), r1=r1, r2=r2, condition=cond_raw)
+            )
     if not samples:
         raise ValueError(f"Samplesheet is empty: {path}")
     return samples
@@ -195,7 +215,8 @@ def assign_conditions_interactive(samples: list[Sample]) -> list[Sample]:
         cond = input(f"  - {s.name}: condition: ").strip()
         if not cond:
             raise ValueError(
-                f"Sample '{s.name}' has no condition. DEG analysis needs a condition for every sample."
+                f"Sample '{s.name}' has no condition. "
+                "DEG analysis needs a condition for every sample."
             )
         s.condition = cond
     return samples
@@ -218,12 +239,18 @@ def collect_samples_from_user() -> list[Sample]:
 
 # ---------- top-level config collector ----------
 
+
 def collect_config_from_user() -> PreprocessingConfig:
     print("=== Preprocessing config ===")
     samples = collect_samples_from_user()
     gtf = ask_path("Path to GTF: ")
     genome_dir = ask_path("Path to STAR genomeDir (index): ")
-    out_dir_raw = input("Output project directory (will be created): ").strip().strip('"').strip("'")
+    out_dir_raw = (
+        input("Output project directory (will be created): ")
+        .strip()
+        .strip('"')
+        .strip("'")
+    )
     out_dir = Path(out_dir_raw).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     threads = ask_int("Threads", default=4)
@@ -232,7 +259,9 @@ def collect_config_from_user() -> PreprocessingConfig:
     if not skip_trim:
         trimmomatic_jar = ask_path("Path to Trimmomatic .jar: ")
     aligner = ask_choice("Aligner", ["star"], default="star")
-    strand = ask_choice("Strandedness", ["unstranded", "forward", "reverse"], default="unstranded")
+    strand = ask_choice(
+        "Strandedness", ["unstranded", "forward", "reverse"], default="unstranded"
+    )
     normalizations = ask_multi_choice(
         "Normalizations to compute",
         ["tpm", "fpkm", "rpkm"],
@@ -241,14 +270,15 @@ def collect_config_from_user() -> PreprocessingConfig:
 
     # ---- DEG (PyDESeq2) — optional ----
     enable_deg = ask_bool(
-        "Run differential expression analysis (PyDESeq2)? Needs >=2 conditions with >=2 replicates each",
+        "Run differential expression analysis (PyDESeq2)? "
+        "Needs >=2 conditions with >=2 replicates each",
         default=False,
     )
     reference_condition: Optional[str] = None
-    treated_condition:   Optional[str] = None
+    treated_condition: Optional[str] = None
     padj_threshold = 0.05
-    lfc_threshold  = 1.0
-    build_pairs    = True
+    lfc_threshold = 1.0
+    build_pairs = True
     if enable_deg:
         samples = assign_conditions_interactive(samples)
         condition_set = sorted({s.condition for s in samples if s.condition})
@@ -265,12 +295,15 @@ def collect_config_from_user() -> PreprocessingConfig:
         # otherwise let the user pick which non-reference condition to compare against.
         non_ref = [c for c in condition_set if c != reference_condition]
         treated_condition = (
-            non_ref[0] if len(non_ref) == 1
-            else ask_choice("Treated condition (foreground)", non_ref, default=non_ref[0])
+            non_ref[0]
+            if len(non_ref) == 1
+            else ask_choice(
+                "Treated condition (foreground)", non_ref, default=non_ref[0]
+            )
         )
         padj_threshold = ask_float("padj threshold for 'significant'", 0.05)
-        lfc_threshold  = ask_float("|log2FC| threshold for 'significant'", 1.0)
-        build_pairs    = ask_bool(
+        lfc_threshold = ask_float("|log2FC| threshold for 'significant'", 1.0)
+        build_pairs = ask_bool(
             "Also build candidate ENSP-pair TSV for the enrichment subgraph?",
             default=True,
         )
@@ -283,7 +316,8 @@ def collect_config_from_user() -> PreprocessingConfig:
     ).strip()
     pathway_interests = (
         [p.strip() for p in raw_interests.split(",") if p.strip()]
-        if raw_interests else []
+        if raw_interests
+        else []
     )
 
     return PreprocessingConfig(
