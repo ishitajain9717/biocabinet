@@ -1,4 +1,4 @@
-[# Biocabinet
+# Biocabinet
 An agentic transcriptomics analysis platform built on [LangGraph](https://github.com/langchain-ai/langgraph).
 It orchestrates FastQC → trimming → alignment → quantification → normalisation → differential expression → GNN-based PPI enrichment, with an optional RAG layer that grounds LLM summaries in KEGG and Reactome pathway knowledge.
 
