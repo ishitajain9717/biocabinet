@@ -74,7 +74,7 @@ llm        = ["langchain-openai>=0.1", "langchain-ollama>=0.1"]
 # GNN-based PPI enrichment (torch-geometric + ESM-2)
 gnn = [
     "torch-geometric>=2.5",
-    "fair-esm>=2.0.0",
+    "esm>=2.0.0",
 ]
 
 # Spatial omics – imaging-based (MERSCOPE / Vizgen)
