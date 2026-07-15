@@ -1,4 +1,4 @@
-# Biocabinet
+[# Biocabinet
 
 [![PyPI version](https://img.shields.io/pypi/v/biocabinet.svg)](https://pypi.org/project/biocabinet/)
 [![Python](https://img.shields.io/pypi/pyversions/biocabinet.svg)](https://pypi.org/project/biocabinet/)
@@ -318,3 +318,4 @@ Child pipelines (bulk, enrichment) share the same checkpointer as the orchestrat
 ## License
 
 MIT
+](https://pypi.org/project/biocabinet/)
