@@ -22,16 +22,18 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Upgrade build tools
+        # setuptools>=77 is required by pyproject.toml (license-files support)
+        run: python -m pip install --upgrade pip "setuptools>=77" wheel
+
+      - name: Install core dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install pytest flake8
-          # PyTorch first — torch-geometric expects torch to already be present
-          pip install "torch>=2.0"
-          pip install "torch-geometric>=2.5"
-          pip install -r requirements.txt
-          # Register the `scripts` package so tests can `from scripts... import`
+          # Install torch first — heavy, but needed for BioBERT RAG embeddings
+          pip install "torch>=2.0" --index-url https://download.pytorch.org/whl/cpu
+          # Install the package in editable mode (resolves all core deps)
           pip install -e .
+          # Install test runner and linter
+          pip install pytest flake8
 
       - name: Lint with flake8 (syntax / undefined names only)
         run: |
