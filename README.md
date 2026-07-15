@@ -1,5 +1,9 @@
-🚧️ This repo is in development right now. 🚧
-# Transcriptomic-agent
+# Biocabinet
+
+[![PyPI version](https://img.shields.io/pypi/v/biocabinet.svg)](https://pypi.org/project/biocabinet/)
+[![Python](https://img.shields.io/pypi/pyversions/biocabinet.svg)](https://pypi.org/project/biocabinet/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/ishitajain9717/biocabinet)
 
 An agentic transcriptomics analysis platform built on [LangGraph](https://github.com/langchain-ai/langgraph).
 It orchestrates FastQC → trimming → alignment → quantification → normalisation → differential expression → GNN-based PPI enrichment, with an optional RAG layer that grounds LLM summaries in KEGG and Reactome pathway knowledge.

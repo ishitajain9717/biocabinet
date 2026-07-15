@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Agentic multi-modal transcriptomics pipeline powered by LangGraph"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 
 keywords = [
     "rna-seq", "bioinformatics", "langgraph", "llm", "agent",
@@ -21,7 +22,7 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "License :: OSI Approved :: MIT License",
+    # "License :: OSI Approved :: MIT License",  # redundant with license = "MIT"
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -29,11 +30,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
-[project.urls]
-Homepage   = "https://github.com/ishitajain9717/biocabinet"
-Source     = "https://github.com/ishitajain9717/biocabinet"
-"Bug Tracker" = "https://github.com/ishitajain9717/biocabinet/issues"
-
+# All flat [project] keys must come before any [project.*] sub-tables
 dependencies = [
     # ── LangGraph / LangChain core ─────────────────────────────────────────
     "langgraph>=1.1.9",
@@ -45,51 +42,53 @@ dependencies = [
     "scipy>=1.13",
     "pandas>=2.0",
 
-    # ── Deep learning (needed for BioBERT RAG embeddings) ──────────────────
-    # torch is kept core because transformers/BioBERT requires it for the RAG
+    # ── Deep learning (BioBERT RAG embeddings need torch) ──────────────────
     "torch>=2.0",
-    "transformers>=4.40",          # BioBERT pathway embeddings (RAG)
+    "transformers>=4.40",
 
     # ── Bioinformatics core ────────────────────────────────────────────────
-    "pydeseq2>=0.4",               # differential expression (DESeq2)
-    "scanpy>=1.10",                # scRNA-seq preprocessing + UMAP/Leiden
-    "mygene>=3.2",                 # ENSG → ENSP ID mapping
+    "pydeseq2>=0.4",
+    "scanpy>=1.10",
+    "mygene>=3.2",
 
     # ── Config / observability ─────────────────────────────────────────────
-    "python-dotenv>=1.0.0",        # auto-load LLM config from .env
-    "langsmith>=0.1",              # LangGraph tracing (opt-in via env var)
+    "python-dotenv>=1.0.0",
+    "langsmith>=0.1",
     "requests>=2.31",
-    "tenacity>=8.2",               # retry logic for external API calls
+    "tenacity>=8.2",
 ]
 
+# ── Sub-tables must come after all flat [project] keys ─────────────────────
+
+[project.urls]
+Homepage      = "https://github.com/ishitajain9717/biocabinet"
+Source        = "https://github.com/ishitajain9717/biocabinet"
+"Bug Tracker" = "https://github.com/ishitajain9717/biocabinet/issues"
+
 [project.optional-dependencies]
-# ── LLM back-ends (choose one or both) ─────────────────────────────────────
+# LLM back-ends
 llm-openai = ["langchain-openai>=0.1"]
 llm-ollama = ["langchain-ollama>=0.1"]
 llm        = ["langchain-openai>=0.1", "langchain-ollama>=0.1"]
 
-# ── GNN-based PPI enrichment ───────────────────────────────────────────────
-# Requires torch-geometric and ESM-2 protein language model.
-# Install with: pip install "biocabinet[gnn]"
+# GNN-based PPI enrichment (torch-geometric + ESM-2)
 gnn = [
     "torch-geometric>=2.5",
-    "fair-esm>=2.0.0",             # ESM-2 protein sequence embeddings
+    "fair-esm>=2.0.0",
 ]
 
-# ── Spatial omics (imaging-based, e.g. MERSCOPE/Vizgen) ────────────────────
-# Install with: pip install "biocabinet[spatial]"
+# Spatial omics – imaging-based (MERSCOPE / Vizgen)
 spatial = [
-    "squidpy>=1.6",                # Vizgen cell-table reader + spatial stats
-    "harmonypy>=0.0.10",           # FOV batch correction
+    "squidpy>=1.6",
+    "harmonypy>=0.0.10",
 ]
 
-# ── Optional trajectory inference (scRNA) ──────────────────────────────────
-# Install with: pip install "biocabinet[trajectory]"
+# Trajectory inference for scRNA
 trajectory = [
-    "palantir>=1.3",               # pseudotime + lineage inference
+    "palantir>=1.3",
 ]
 
-# ── Everything (for development / full feature set) ─────────────────────────
+# Everything — for development or full feature set
 full = [
     "langchain-openai>=0.1",
     "langchain-ollama>=0.1",
@@ -100,7 +99,7 @@ full = [
     "palantir>=1.3",
 ]
 
-# ── Development tools ───────────────────────────────────────────────────────
+# Dev tools
 dev = [
     "pytest>=8.0",
     "build>=1.0",

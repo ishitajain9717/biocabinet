@@ -24,16 +24,28 @@ env/
 # ── Pipeline runtime outputs ──────────────────────────────────────────────────
 runs/
 pipeline_runs.sqlite
+pipeline_runs.sqlite-shm
+pipeline_runs.sqlite-wal
 preprocessing_run.json
 app.log
 *.log
 
-# Intermediate alignment / QC outputs written by the pipeline nodes
+# Intermediate alignment / QC outputs written by the pipeline nodes (bulk)
 01_qc/
 02_trimmed/
 03_bam/
 04_counts/
 05_normalized/
+
+# scRNA-seq step outputs written to the project root during a run
+00_load/
+02_filter/
+03_normalize/
+04_pca/
+05_cluster/
+06_markers/
+07_trajectory/
+09_benchmark/
 
 # Jupyter
 .ipynb_checkpoints/
